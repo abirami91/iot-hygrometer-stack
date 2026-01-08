@@ -1,0 +1,34 @@
+services:
+  hygro-collector:
+    build: ./collector
+    container_name: hygro-collector
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    command: bash -lc "hciconfig hci0 reset || true; python /app/gatt_collector.py"
+    environment:
+      DEVICE_MAC: ${DEVICE_MAC}
+      OUTPUT: "/data/current.csv"
+      INTERVAL_SECONDS: 1200   # 20 minutes
+      # robust GATT
+      PERSISTENT_NOTIFY: ${PERSISTENT_NOTIFY:-1}
+      SCAN_TIMEOUT: ${SCAN_TIMEOUT:-60}
+      CONNECT_TIMEOUT: ${CONNECT_TIMEOUT:-20}
+      MAX_BACKOFF: ${MAX_BACKOFF:-60}
+      HUMIDITY_SCALE: ${HUMIDITY_SCALE:-1.00}
+      PRINT_RAW: ${PRINT_RAW:-0}
+      DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket"
+    volumes:
+      - ./data:/data
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+
+  hygro-cloud:
+    build: ./server
+    container_name: hygro-cloud
+    restart: unless-stopped
+    ports:
+      - "8081:8000"
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      - hygro-collector

@@ -1,0 +1,15 @@
+# python
+__pycache__/
+*.pyc
+
+# env
+.env
+
+# data (keep folders, ignore generated files)
+data/*.csv
+data/*.db
+data/archive/*
+data/current.noheader.bak
+
+# docker/logs
+*.log
