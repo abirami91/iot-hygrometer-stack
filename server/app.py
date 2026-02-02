@@ -10,6 +10,13 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+import json
+from fastapi.responses import FileResponse
+
+INSIGHTS_PATH = os.path.join("data", "insights", "latest.json")
+
+
+
 DB_PATH = os.path.join("data", "hygro.db")
 os.makedirs("data", exist_ok=True)
 os.makedirs("static/uploads", exist_ok=True)
@@ -100,7 +107,12 @@ def import_csv_bytes(raw: bytes, conn: sqlite3.Connection) -> int:
 
     return inserted
 
-
+@app.get("/api/insights/latest")
+def api_insights_latest():
+    if not os.path.exists(INSIGHTS_PATH):
+        return {"ok": False, "detail": "No insights yet"}
+    with open(INSIGHTS_PATH, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):

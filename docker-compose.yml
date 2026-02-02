@@ -11,7 +11,7 @@ services:
       OUTPUT: "/data/current.csv"
       INTERVAL_SECONDS: 1200   # 20 minutes
       # robust GATT
-      PERSISTENT_NOTIFY: ${PERSISTENT_NOTIFY:-1}
+      PERSISTENT_NOTIFY: ${PERSISTENT_NOTIFY:-1}  
       SCAN_TIMEOUT: ${SCAN_TIMEOUT:-60}
       CONNECT_TIMEOUT: ${CONNECT_TIMEOUT:-20}
       MAX_BACKOFF: ${MAX_BACKOFF:-60}
@@ -27,8 +27,25 @@ services:
     container_name: hygro-cloud
     restart: unless-stopped
     ports:
-      - "8081:8000"
+      - "192.168.1.44:8081:8000"
     volumes:
       - ./data:/app/data
     depends_on:
       - hygro-collector
+
+  
+  hygro-agent:
+    build: ./agent
+    container_name: hygro-agent
+    restart: unless-stopped
+    environment:
+      DB_PATH: /data/hygro.db
+      OUT_PATH: /data/insights/latest.json
+      INTERVAL_MINUTES: "20"
+      HUMIDITY_WARN: "60"
+      HUMIDITY_ALERT: "65"
+    volumes:
+      - ./data:/data
+    depends_on:
+      - hygro-cloud
+

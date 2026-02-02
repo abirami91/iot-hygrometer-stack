@@ -10,6 +10,7 @@ data/*.csv
 data/*.db
 data/archive/*
 data/current.noheader.bak
+data/insights
 
 # docker/logs
 *.log

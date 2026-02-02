@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+import os, json, sqlite3, pathlib
+from datetime import datetime, timezone
+
+DB_PATH = os.getenv("DB_PATH", "data/hygro.db")
+OUT_PATH = os.getenv("OUT_PATH", "data/insights/latest.json")
+INTERVAL_MINUTES = int(os.getenv("INTERVAL_MINUTES", "20"))
+WARN_RH = float(os.getenv("HUMIDITY_WARN", "60"))
+ALERT_RH = float(os.getenv("HUMIDITY_ALERT", "65"))
+
+def stats(xs):
+    xs = [x for x in xs if x is not None]
+    if not xs:
+        return None
+    return {
+        "min": float(min(xs)),
+        "max": float(max(xs)),
+        "avg": float(sum(xs) / len(xs)),
+        "count": int(len(xs)),
+    }
+
+def hours_above(xs, threshold):
+    xs = [x for x in xs if x is not None]
+    n = sum(1 for x in xs if x >= threshold)
+    return round(n * INTERVAL_MINUTES / 60.0, 2)
+
+def fetch_window(conn, start_epoch, end_epoch):
+    cur = conn.execute(
+        """SELECT epoch, temp_c, humidity_pct, battery_mv
+           FROM readings
+           WHERE epoch BETWEEN ? AND ?
+           ORDER BY epoch ASC""",
+        (start_epoch, end_epoch)
+    )
+    rows = cur.fetchall()
+    temps = [r[1] for r in rows]
+    hums  = [r[2] for r in rows]
+    batts = [r[3] for r in rows]
+    return rows, temps, hums, batts
+
+def main():
+    now = int(datetime.now(timezone.utc).timestamp())
+    day_start = now - 24 * 3600
+    week_start = now - 7 * 24 * 3600
+
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        latest = None
+        cur = conn.execute(
+            "SELECT ts_utc, epoch, temp_c, humidity_pct, battery_mv FROM readings ORDER BY epoch DESC LIMIT 1"
+        )
+        row = cur.fetchone()
+        if row:
+            latest = dict(zip(["ts_utc","epoch","temp_c","humidity_pct","battery_mv"], row))
+
+        rows24, t24, h24, b24 = fetch_window(conn, day_start, now)
+        rows7,  t7,  h7,  b7  = fetch_window(conn, week_start, now)
+
+        expected_24 = int(round((24 * 60) / INTERVAL_MINUTES))
+        expected_7  = int(round((7 * 24 * 60) / INTERVAL_MINUTES))
+
+        out = {
+            "generated_utc": datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
+            "sampling_interval_minutes": INTERVAL_MINUTES,
+            "thresholds": {"warn_rh": WARN_RH, "alert_rh": ALERT_RH},
+            "latest": latest,
+            "last_24h": {
+                "points": len(rows24),
+                "expected_points": expected_24,
+                "temperature": stats(t24),
+                "humidity": stats(h24),
+                "hours_humidity_above_warn": hours_above(h24, WARN_RH),
+                "hours_humidity_above_alert": hours_above(h24, ALERT_RH),
+            },
+            "last_7d": {
+                "points": len(rows7),
+                "expected_points": expected_7,
+                "temperature": stats(t7),
+                "humidity": stats(h7),
+                "hours_humidity_above_warn": hours_above(h7, WARN_RH),
+                "hours_humidity_above_alert": hours_above(h7, ALERT_RH),
+            }
+        }
+
+        status = "ok"
+        if out["last_24h"]["hours_humidity_above_alert"] >= 1.0:
+            status = "alert"
+        elif out["last_24h"]["hours_humidity_above_warn"] >= 1.0:
+            status = "warn"
+        out["status"] = status
+
+        p = pathlib.Path(OUT_PATH)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(out, indent=2), encoding="utf-8")
+
+        print(f"[agent] wrote {OUT_PATH} status={status}")
+
+    finally:
+        conn.close()
+
+if __name__ == "__main__":
+    main()

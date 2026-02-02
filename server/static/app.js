@@ -59,6 +59,38 @@ async function getLatest() {
   updateCard("cardBatt", `${r.battery_mv ?? "—"}`);
 }
 
+// ---------- insights badge ----------
+async function refreshInsightsBadge() {
+  try {
+    const res = await fetch("/api/insights/latest", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const status = (data.status || "idle").toLowerCase();
+
+    // optional: show hours in the badge text
+    const hWarn = data?.last_24h?.hours_humidity_above_warn;
+    const hAlert = data?.last_24h?.hours_humidity_above_alert;
+
+    console.log("insights status =", status);
+
+    if (status === "ok") {
+      setBadge("OK", "bg-emerald-100 text-emerald-800");
+    } else if (status === "warn") {
+      const label = (typeof hWarn === "number") ? `WARN (${hWarn}h)` : "WARN";
+      setBadge(label, "bg-amber-100 text-amber-800");
+    } else if (status === "alert") {
+      const label = (typeof hAlert === "number") ? `ALERT (${hAlert}h)` : "ALERT";
+      setBadge(label, "bg-rose-100 text-rose-800");
+    } else {
+      setBadge("Idle", "bg-slate-200 text-slate-700");
+    }
+  } catch (e) {
+    // If insights aren't ready yet (file missing etc.), don't treat as error.
+    setBadge("No insights", "bg-slate-200 text-slate-700");
+  }
+}
+
 // ---------- upload / export ----------
 async function uploadCSV(file) {
   const fd = new FormData();
@@ -77,20 +109,28 @@ function setupUpload() {
   if (btn) btn.addEventListener("click", async () => {
     msg.textContent = "";
     if (!fi.files.length) { msg.textContent = "Choose a CSV first."; return; }
-    btn.disabled = true; btn.textContent = "Uploading…"; setBadge("Uploading", "bg-blue-100 text-blue-800");
+    btn.disabled = true;
+    btn.textContent = "Uploading…";
+    setBadge("Uploading", "bg-blue-100 text-blue-800");
+
     try {
       const json = await uploadCSV(fi.files[0]);
       msg.textContent = `Uploaded. Inserted ${json.inserted} rows.`;
       await getLatest();
       await loadDay();
+      await refreshInsightsBadge();
+
       setBadge("Updated", "bg-emerald-100 text-emerald-800");
     } catch (e) {
       console.error(e);
       msg.textContent = "Upload failed.";
       setBadge("Error", "bg-rose-100 text-rose-800");
     } finally {
-      btn.disabled = false; btn.textContent = "Upload";
-      setTimeout(() => setBadge("Idle"), 1500);
+      btn.disabled = false;
+      btn.textContent = "Upload";
+
+      // ✅ restore the insights badge instead of forcing Idle
+      setTimeout(() => refreshInsightsBadge(), 1500);
     }
   });
 
@@ -106,7 +146,9 @@ function setupUpload() {
     const blob = new Blob([csv], { type: "text/csv" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url; a.download = `${d}_readings.csv`; a.click();
+    a.href = url;
+    a.download = `${d}_readings.csv`;
+    a.click();
     URL.revokeObjectURL(url);
   });
 }
@@ -200,7 +242,8 @@ function makeBattChart(ctx) {
       { label: "Battery (mV)", data: [], borderColor: C.batt, backgroundColor: "transparent", tension: 0.25, pointRadius: 1.5 }
     ]},
     options: {
-      responsive: true, maintainAspectRatio: false,
+      responsive: true,
+      maintainAspectRatio: false,
       interaction: { mode: "index", intersect: false },
       parsing: false,
       scales: { x: { type: "category" }, y: { type: "linear" } }
@@ -235,8 +278,6 @@ function makeBarChart(ctx) {
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      // IMPORTANT: let Chart.js parse [labels[], numbers[]] normally
-      // (do NOT set parsing:false here)
       interaction: { mode: "index", intersect: false },
       scales: {
         x: { type: "category", ticks: { color: "#4b5563" }, grid: { display:false } },
@@ -247,7 +288,6 @@ function makeBarChart(ctx) {
     }
   });
 }
-
 
 function ensureCharts() {
   const mainCtx = document.getElementById("chartMain")?.getContext("2d");
@@ -394,9 +434,11 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await getLatest();
   await loadDay();
+  await refreshInsightsBadge(); // ✅ run once at startup
 
   setInterval(async () => {
     await getLatest();
     await loadDay();
+    await refreshInsightsBadge();
   }, 60_000);
 });

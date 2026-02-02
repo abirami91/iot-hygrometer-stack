@@ -89,6 +89,32 @@ echo "📂 Preparing data directory..."
 mkdir -p data/archive
 sudo chown -R "$USER":"$USER" data || true
 
+# 4.5) Fresh start (friend-proof default)
+# Default: archive old DB/CSV so dashboard starts clean.
+# Opt-out: STARTUP_KEEP_HISTORY=1 ./startup.sh
+if [[ "${STARTUP_KEEP_HISTORY:-0}" != "1" ]]; then
+  echo "🧹 Fresh start enabled (set STARTUP_KEEP_HISTORY=1 to keep history)."
+
+  mkdir -p data/archive data/insights
+
+  ts="$(date +%Y%m%d_%H%M%S)"
+
+  if [[ -f "data/hygro.db" ]]; then
+    echo "📦 Archiving old DB -> data/archive/hygro_${ts}.db"
+    mv "data/hygro.db" "data/archive/hygro_${ts}.db" || true
+  fi
+
+  if [[ -f "data/current.csv" ]]; then
+    echo "📦 Archiving old CSV -> data/archive/current_${ts}.csv"
+    mv "data/current.csv" "data/archive/current_${ts}.csv" || true
+  fi
+
+  # Remove computed artifacts (if you add agent later)
+  rm -f data/insights/latest.json 2>/dev/null || true
+  rm -rf data/reports 2>/dev/null || true
+else
+  echo "📚 Keeping history (STARTUP_KEEP_HISTORY=1)."
+fi
 
 
 # 5) Start stack
@@ -98,16 +124,22 @@ docker compose up -d --build
 # 6) Wait for server
 # 6) Wait for server
 echo "⏳ Waiting for http://localhost:8081 ..."
-for i in {1..20}; do
-  if curl -fsS "http://localhost:8081/api/latest" >/dev/null 2>&1; then
-    echo "✅ Server is responding"
+echo "📥 Importing current.csv into database (retry until data appears)..."
+for i in {1..12}; do
+  # Try import (will succeed even if file has only header)
+  curl -s -X POST http://localhost:8081/api/import-current >/dev/null 2>&1 || true
 
-    echo "📥 Importing current.csv into database..."
-    curl -s -X POST http://localhost:8081/api/import-current >/dev/null 2>&1 || true
-
-    break
+  # Check if DB has a reading now
+  if curl -fsS "http://localhost:8081/api/latest" | grep -q '"reading":' ; then
+    # If it is not null, we are good
+    if ! curl -fsS "http://localhost:8081/api/latest" | grep -q '"reading": null' ; then
+      echo "✅ Data is available in dashboard."
+      break
+    fi
   fi
-  sleep 1
+
+  echo "⏳ No reading yet (attempt $i/12). Waiting 10s..."
+  sleep 10
 done
 
 
