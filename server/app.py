@@ -46,6 +46,23 @@ def get_db():
     return conn
 
 def import_csv_bytes(raw: bytes, conn: sqlite3.Connection) -> int:
+    """
+    Robust importer for current.csv.
+
+    Accepts either:
+      A) 5-col canonical format:
+         timestamp_iso,epoch,temp_c,humidity_pct,battery_mv
+
+      B) 4-col friendly format:
+         timestamp,temperature_c,humidity_percent,battery_mv
+         (epoch is derived from timestamp)
+
+    Also tolerates:
+      - timestamps ending with 'Z' or '+00:00'
+      - extra whitespace
+      - ragged rows
+      - header mismatch (e.g., 4 headers but 5 values)
+    """
     text = raw.decode("utf-8", errors="replace")
     reader = csv.reader(io.StringIO(text))
 
@@ -54,58 +71,116 @@ def import_csv_bytes(raw: bytes, conn: sqlite3.Connection) -> int:
     except StopIteration:
         return 0
 
-    header = [h.strip().lower() for h in header]
+    # Normalize header (we don't fully trust it for row parsing)
+    header_norm = [h.strip().lower() for h in header]
 
-    def idx(name: str) -> Optional[int]:
-        return header.index(name) if name in header else None
+    def to_epoch(ts: str) -> int:
+        s = (ts or "").strip()
+        if not s:
+            raise ValueError("empty timestamp")
+        # Accept Zulu time
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        return int(dt.timestamp())
 
-    i_ts = idx("timestamp_iso")
-    i_ep = idx("epoch")
-    i_t  = idx("temp_c")
-    i_h  = idx("humidity_pct")
-    i_b  = idx("battery_mv") if "battery_mv" in header else None
+    def store_ts_z(ts: str) -> str:
+        """Store timestamps consistently with trailing Z for /api/day BETWEEN logic."""
+        s = (ts or "").strip()
+        if not s:
+            raise ValueError("empty timestamp")
+        if s.endswith("+00:00"):
+            return s[:-6] + "Z"
+        return s
 
-    if i_ts is None or i_ep is None:
-        return 0
+    def float_or_none(v: str):
+        v = (v or "").strip()
+        if v == "":
+            return None
+        try:
+            return float(v)
+        except:
+            return None
 
     inserted = 0
+
     with conn:
         for row in reader:
             if not row:
                 continue
-            row = list(row) + [""] * (5 - len(row))
 
-            ts = (row[i_ts] or "").strip()
-            ep_raw = (row[i_ep] or "").strip()
-            if not ts or not ep_raw:
+            # Strip cells
+            vals = [("" if c is None else str(c).strip()) for c in row]
+
+            # --- Canonical row interpretation by length (header may lie) ---
+            ts_raw = ""
+            ep_raw = ""
+            temp_raw = ""
+            hum_raw = ""
+            batt_raw = ""
+
+            if len(vals) >= 5:
+                # Prefer 5-col: ts, epoch, temp, hum, batt
+                ts_raw, ep_raw, temp_raw, hum_raw, batt_raw = vals[0], vals[1], vals[2], vals[3], vals[4]
+
+                # If the second column is NOT epoch-like, fallback to 4-col interpretation
+                # (this helps when a row has extra columns unrelated to epoch)
+                try:
+                    ep_num = float(ep_raw) if ep_raw != "" else None
+                except:
+                    ep_num = None
+
+                if ep_num is None or ep_num < 10_000_000:
+                    # Treat as 4-col: ts, temp, hum, batt (ignore extras)
+                    ts_raw, temp_raw, hum_raw, batt_raw = vals[0], vals[1], vals[2], vals[3]
+                    ep_raw = ""
+
+            elif len(vals) == 4:
+                # 4-col: ts, temp, hum, batt
+                ts_raw, temp_raw, hum_raw, batt_raw = vals[0], vals[1], vals[2], vals[3]
+                ep_raw = ""
+            else:
+                # Not enough columns
                 continue
 
+            ts_raw = (ts_raw or "").strip()
+            if not ts_raw:
+                continue
+
+            # epoch: take from column if valid, else derive from ts
+            epoch = None
+            if ep_raw:
+                try:
+                    epoch = int(float(ep_raw))
+                except:
+                    epoch = None
+
+            if epoch is None:
+                try:
+                    epoch = to_epoch(ts_raw)
+                except:
+                    continue
+
+            temp = float_or_none(temp_raw)
+            hum  = float_or_none(hum_raw)
+            batt = float_or_none(batt_raw)
+            batt_int = int(batt) if batt is not None else None
+
+            # Store timestamp consistently for /api/day BETWEEN string comparison
             try:
-                epoch = int(float(ep_raw))
+                ts_store = store_ts_z(ts_raw)
             except:
                 continue
 
-            def f_or_none(i):
-                if i is None: return None
-                v = (row[i] or "").strip()
-                if v == "": return None
-                try:
-                    return float(v)
-                except:
-                    return None
-
-            temp = f_or_none(i_t)
-            hum  = f_or_none(i_h)
-            batt = f_or_none(i_b)
-            batt_int = int(batt) if batt is not None else None
-
             conn.execute(
                 "INSERT OR REPLACE INTO readings(ts_utc, epoch, temp_c, humidity_pct, battery_mv) VALUES (?,?,?,?,?)",
-                (ts, epoch, temp, hum, batt_int)
+                (ts_store, epoch, temp, hum, batt_int)
             )
             inserted += 1
 
     return inserted
+
+
 
 @app.get("/api/insights/latest")
 def api_insights_latest():

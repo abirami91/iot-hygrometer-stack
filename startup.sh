@@ -65,8 +65,17 @@ set_env() {
   fi
 }
 
-DEVICE_MAC="$(get_env DEVICE_MAC | tr -d '\r' || true)"
+# 3.5) Ensure BIND_IP is set (Option A)
+BIND_IP="$(get_env BIND_IP | tr -d '\r' || true)"
+if [[ -z "${BIND_IP}" ]]; then
+  BIND_IP="$(hostname -I | awk '{print $1}')"
+  set_env BIND_IP "${BIND_IP}"
+  echo "✅ Saved BIND_IP=${BIND_IP} to .env"
+fi
+BASE_URL="http://${BIND_IP}:8081"
 
+# 3.6) Ensure DEVICE_MAC is set (still interactive for now)
+DEVICE_MAC="$(get_env DEVICE_MAC | tr -d '\r' || true)"
 if [[ -z "${DEVICE_MAC}" ]]; then
   echo ""
   echo "⚠️  DEVICE_MAC is not set in .env"
@@ -86,68 +95,53 @@ fi
 
 # 4) Data directory + permissions
 echo "📂 Preparing data directory..."
-mkdir -p data/archive
+mkdir -p data/archive data/insights data/reports
 sudo chown -R "$USER":"$USER" data || true
 
-# 4.5) Fresh start (friend-proof default)
-# Default: archive old DB/CSV so dashboard starts clean.
-# Opt-out: STARTUP_KEEP_HISTORY=1 ./startup.sh
-if [[ "${STARTUP_KEEP_HISTORY:-0}" != "1" ]]; then
-  echo "🧹 Fresh start enabled (set STARTUP_KEEP_HISTORY=1 to keep history)."
-
-  mkdir -p data/archive data/insights
-
+# 4.5) Optional: archive snapshot (COPY, not MOVE)
+# Use: STARTUP_ARCHIVE_SNAPSHOT=1 ./startup.sh
+if [[ "${STARTUP_ARCHIVE_SNAPSHOT:-0}" == "1" ]]; then
   ts="$(date +%Y%m%d_%H%M%S)"
-
-  if [[ -f "data/hygro.db" ]]; then
-    echo "📦 Archiving old DB -> data/archive/hygro_${ts}.db"
-    mv "data/hygro.db" "data/archive/hygro_${ts}.db" || true
-  fi
-
   if [[ -f "data/current.csv" ]]; then
-    echo "📦 Archiving old CSV -> data/archive/current_${ts}.csv"
-    mv "data/current.csv" "data/archive/current_${ts}.csv" || true
+    echo "📦 Snapshot current.csv -> data/archive/current_${ts}.csv"
+    cp "data/current.csv" "data/archive/current_${ts}.csv" || true
   fi
-
-  # Remove computed artifacts (if you add agent later)
-  rm -f data/insights/latest.json 2>/dev/null || true
-  rm -rf data/reports 2>/dev/null || true
-else
-  echo "📚 Keeping history (STARTUP_KEEP_HISTORY=1)."
+  if [[ -f "data/hygro.db" ]]; then
+    echo "📦 Snapshot hygro.db -> data/archive/hygro_${ts}.db"
+    cp "data/hygro.db" "data/archive/hygro_${ts}.db" || true
+  fi
 fi
 
+# IMPORTANT: ensure current.csv exists (so import endpoint always has a stable path)
+# Collector will overwrite it when it runs.
+if [[ ! -f "data/current.csv" ]]; then
+  echo "📝 Creating placeholder data/current.csv (collector will update it)..."
+  printf "timestamp,temperature_c,humidity_percent,battery_mv\n" > data/current.csv
+fi
 
 # 5) Start stack
 echo "🐳 Starting containers..."
 docker compose up -d --build
 
 # 6) Wait for server
-# 6) Wait for server
-echo "⏳ Waiting for http://localhost:8081 ..."
-echo "📥 Importing current.csv into database (retry until data appears)..."
-for i in {1..12}; do
-  # Try import (will succeed even if file has only header)
-  curl -s -X POST http://localhost:8081/api/import-current >/dev/null 2>&1 || true
-
-  # Check if DB has a reading now
-  if curl -fsS "http://localhost:8081/api/latest" | grep -q '"reading":' ; then
-    # If it is not null, we are good
-    if ! curl -fsS "http://localhost:8081/api/latest" | grep -q '"reading": null' ; then
-      echo "✅ Data is available in dashboard."
-      break
-    fi
+echo "⏳ Waiting for ${BASE_URL} ..."
+for i in {1..30}; do
+  if curl -fsS "${BASE_URL}/" >/dev/null 2>&1; then
+    echo "✅ Server reachable."
+    break
   fi
-
-  echo "⏳ No reading yet (attempt $i/12). Waiting 10s..."
-  sleep 10
+  echo "⏳ Not up yet ($i/30). Waiting 2s..."
+  sleep 2
 done
 
+# 7) Import current.csv once now (best effort)
+echo "📥 Importing current.csv into database..."
+curl -s -X POST "${BASE_URL}/api/import-current" >/dev/null 2>&1 || true
 
-# 7) Auto-import current.csv every 20 minutes (host cron)
+# 8) Auto-import current.csv every 20 minutes (host cron)
 # Default: install automatically (friend-proof)
 # Opt-out: STARTUP_SKIP_CRON=1 ./startup.sh
-
-CRON_LINE="*/20 * * * * curl -s -X POST http://localhost:8081/api/import-current >/dev/null 2>&1"
+CRON_LINE="*/20 * * * * curl -s -X POST ${BASE_URL}/api/import-current >/dev/null 2>&1"
 CRON_TAG="# hygro-cloud auto-import"
 
 if [[ "${STARTUP_SKIP_CRON:-0}" == "1" ]]; then
@@ -162,12 +156,10 @@ else
   echo "   $CRON_LINE"
 fi
 
-# 8) Print URLs
-IP="$(hostname -I | awk '{print $1}')"
+# 9) Print URLs
 echo ""
 echo "========================================"
 echo " 🎉 Hygrometer system is up!"
 echo ""
-echo " Local:   http://localhost:8081"
-echo " LAN:     http://${IP}:8081"
+echo " URL: ${BASE_URL}"
 echo "========================================"
