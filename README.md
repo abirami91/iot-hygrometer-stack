@@ -17,6 +17,8 @@ No cloud. No accounts. Your data stays on your Pi.
 - 🟡 Visual **status badge** (OK / WARN / ALERT)
 - 🔒 **Private by default** (LAN-only access)
 - 🧑‍🤝‍🧑 Friend-friendly one-command startup
+- 📧 Automated daily PDF reports (optional email delivery)
+
 
 ---
 
@@ -107,33 +109,77 @@ docker compose version
 
 🚀 Quick Start (Recommended)
 
+🧑‍🚀 First Run (What Happens Automatically)
+
 Clone the repo and run 
+
+When running for the first time:
 ```bash
 chmod +x startup.sh
 ./startup.sh
 
 ```
 
-What startup.sh does
+the script will guide you through setup automatically.
 
-✅ Checks Docker & Docker Compose
+First startup flow
+
+✅ Checks Docker and Docker Compose
 
 🔵 Enables Bluetooth service
 
 📄 Creates .env from .env.example
 
-📡 Prompts for hygrometer MAC address (once)
+📡 Asks for your hygrometer MAC address (one time only)
 
-🧹 Archives old data (safe default)
+📂 Creates data folders
 
-🐳 Builds & starts all containers
+🐳 Builds and starts all containers
 
-🧠 Runs insights agent automatically
+📥 Imports initial sensor data
 
-⏱ Installs cron job (auto-import every 20 min)
+🧠 Starts insights agent
 
-🌐 Prints dashboard URLs
+⏱ Installs auto-import cron job (every 20 minutes)
 
+🌐 Prints dashboard URL
+
+After this, the system runs automatically on every reboot.
+
+You normally do not need to run startup again.
+
+## 📡 Selecting Your Hygrometer (First Setup)
+
+On first startup, the dashboard automatically opens a setup screen.
+
+The system will:
+
+Scan for nearby Bluetooth hygrometers
+
+Show detected devices
+
+Let you select your sensor directly from the UI
+
+No terminal commands are required.
+
+Steps
+
+1. Open the dashboard:
+```bash
+    http://<pi-ip>:8081
+```
+2. Click Scan for devices
+
+3. Select your hygrometer from the list (e.g. LYWSD03MMC)
+
+4. The configuration is saved automatically
+
+After selection, the dashboard switches to normal monitoring mode.
+
+The selected device is stored locally in:
+```bash
+data/config.json
+```
 
 ## 🌐 Access the Dashboard
 
@@ -141,7 +187,7 @@ After startup:
 
 * Local (Pi):
 ```bash
-    http://localhost:8081
+    http://<pi-ip>:8081
 ```
 * From another device on same Wi-Fi:
 ```bash
@@ -192,6 +238,81 @@ docker compose logs -f
 docker compose down
 docker compose up -d --build
 ```
+## 📧 Email Reports (Optional SMTP Setup)
+
+The system can automatically send daily hygrometer reports via email.
+
+This is optional and disabled by default.
+
+Interactive setup (recommended)
+
+Run:
+```bash
+    STARTUP_CONFIGURE_SMTP=1 ./startup.sh
+```
+You will be prompted for:
+
+SMTP host (example: smtp.gmail.com)
+
+SMTP port (usually 587)
+
+Email username
+
+App password
+
+Recipient email
+
+The values are stored safely in .env.
+
+
+## Gmail Setup (Recommended)
+
+If using Gmail:
+
+Enable 2-Factor Authentication
+
+Create an App Password
+
+Google Account → Security → App Passwords
+
+Use the generated password (not your normal password)
+
+```bash
+Example:
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_TLS=1
+SMTP_USER=your@email.com
+SMTP_FROM=your@email.com
+SMTP_TO=your@email.com
+```
+Test email immediately
+
+To verify email configuration:
+```bash
+STARTUP_TEST_EMAIL=1 ./startup.sh
+```
+This generates a report and sends it immediately.
+
+## Automatic report schedule
+
+Reports are generated daily by the reporter container.
+
+Default schedule:
+```bash
+21:05 (local time)
+```
+Reports include:
+
+Temperature statistics
+
+Humidity statistics
+
+Battery status
+
+Hours above warning/alert thresholds
+
+PDF + ZIP data export
 
 ## 🧩 Planned / Optional Extensions
 

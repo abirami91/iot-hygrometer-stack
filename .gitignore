@@ -14,3 +14,12 @@ data/insights
 
 # docker/logs
 *.log
+
+# runtime data
+data/
+*.db
+*.zip
+
+# python
+__pycache__/
+*.pyc

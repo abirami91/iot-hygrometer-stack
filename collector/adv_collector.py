@@ -1,15 +1,31 @@
 import os, time, csv, pathlib, asyncio, struct, binascii
 from datetime import datetime
 from bleak import BleakScanner
+import json
 
+CONFIG_PATH = os.getenv("SETUP_CONFIG_PATH", "/data/config.json")
 FE95 = "0000fe95-0000-1000-8000-00805f9b34fb"
 OUTPUT = os.getenv("OUTPUT", "/data/current.csv")
 INTERVAL = int(os.getenv("INTERVAL_SECONDS", "600"))
 MIN_RSSI = int(os.getenv("MIN_RSSI", "-120"))
+selected_mac = None
+last_cfg_check = 0.0
+CFG_REFRESH_SECS = int(os.getenv("CFG_REFRESH_SECS", "5"))
+
 
 last = {"temp_c": None, "humidity_pct": None}
 last_seen = 0.0
 last_written = 0.0
+
+def get_selected_mac():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f) or {}
+        mac = (cfg.get("device_mac") or "").strip().upper()
+        return mac or None
+    except Exception:
+        return None
+
 
 def ensure_csv(p):
     pp = pathlib.Path(p)
@@ -58,29 +74,32 @@ def parse_and_debug(sd: bytes):
     info["events"] = events
     return (out or None), info
 
+
 def on_adv(d, adv):
     global last, last_seen
+    global selected_mac, last_cfg_check
+
+    # ---- refresh selected device periodically ----
+    now = time.time()
+    if now - last_cfg_check >= CFG_REFRESH_SECS:
+        selected_mac = get_selected_mac()
+        last_cfg_check = now
+
+    # ---- no device selected yet ----
+    if not selected_mac:
+        return
+
+    # ---- ignore other BLE devices early ----
+    if d.address.strip().upper() != selected_mac:
+        return
+
+    # ---- existing logic continues ----
     if adv.rssi is not None and adv.rssi < MIN_RSSI:
         return
+
     sd = adv.service_data.get(FE95)
     if not sd:
         return
-    parsed, info = parse_and_debug(sd)
-    # Always print a debug line for FE95
-    print(f"[FE95] addr={d.address} RSSI={adv.rssi} enc={info.get('enc')} fc={info.get('fc')} "
-          f"cnt={info.get('cnt')} len={info.get('len')} hex={info.get('hex')}", flush=True)
-    if info.get("events"):
-        print(f"[FE95] events={info['events']}", flush=True)
-
-    if parsed:
-        changed = False
-        for k in ("temp_c", "humidity_pct"):
-            if k in parsed and parsed[k] is not None and last.get(k) != parsed[k]:
-                changed = True
-                last[k] = parsed[k]
-        if changed:
-            last_seen = time.time()
-            print(f"[ADV]  {d.address} -> T={last.get('temp_c')} H={last.get('humidity_pct')}", flush=True)
 
 async def main():
     global last_written

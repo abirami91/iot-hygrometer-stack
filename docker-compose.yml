@@ -5,11 +5,16 @@ services:
     restart: unless-stopped
     privileged: true
     network_mode: host
-    command: bash -lc "hciconfig hci0 reset || true; python /app/gatt_collector.py"
+
+    command: >
+      bash -lc "hciconfig hci0 reset || true;
+      python /app/gatt_collector.py"
+
     environment:
       DEVICE_MAC: ${DEVICE_MAC}
       OUTPUT: "/data/current.csv"
-      INTERVAL_SECONDS: 1200   # 20 minutes
+      INTERVAL_SECONDS: 1200
+
       # robust GATT
       PERSISTENT_NOTIFY: ${PERSISTENT_NOTIFY:-1}
       SCAN_TIMEOUT: ${SCAN_TIMEOUT:-60}
@@ -17,10 +22,13 @@ services:
       MAX_BACKOFF: ${MAX_BACKOFF:-60}
       HUMIDITY_SCALE: ${HUMIDITY_SCALE:-1.00}
       PRINT_RAW: ${PRINT_RAW:-0}
+
       DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket"
+
     volumes:
       - ./data:/data
       - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+
 
   hygro-cloud:
     build: ./server
@@ -28,22 +36,60 @@ services:
     restart: unless-stopped
     ports:
       - "${BIND_IP:-0.0.0.0}:8081:8000"
+    environment:
+      DBUS_SYSTEM_BUS_ADDRESS: "unix:path=/run/dbus/system_bus_socket"
     volumes:
-      - ./data:/app/data
+      - ./data:/data
+      - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket:ro
+    privileged: true
     depends_on:
       - hygro-collector
+
+
 
   hygro-agent:
     build: ./agent
     container_name: hygro-agent
     restart: unless-stopped
+
     environment:
       DB_PATH: /data/hygro.db
       OUT_PATH: /data/insights/latest.json
       INTERVAL_MINUTES: "20"
       HUMIDITY_WARN: "60"
       HUMIDITY_ALERT: "65"
+
+    volumes:
+      - ./data:/data
+
+    depends_on:
+      - hygro-cloud
+
+  hygro-reporter:
+    build: ./reporter
+    container_name: hygro-reporter
+    restart: unless-stopped
+    environment:
+      TZ: "Europe/Berlin"
+      DATA_DIR: "/data"
+      DB_PATH: "/data/hygro.db"
+      REPORTS_DIR: "/data/reports"
+
+      # same thresholds as agent (optional)
+      HUMIDITY_WARN: "60"
+      HUMIDITY_ALERT: "65"
+
+      # SMTP (set these in .env)
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_TO: ${SMTP_TO:-}
+      SMTP_TLS: ${SMTP_TLS:-1}
+
     volumes:
       - ./data:/data
     depends_on:
       - hygro-cloud
+

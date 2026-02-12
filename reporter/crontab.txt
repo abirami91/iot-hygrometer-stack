@@ -1,0 +1,4 @@
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+5 21 * * * root SEND_EMAIL=1 python /app/generate_and_send.py >> /data/reports/reporter.log 2>&1

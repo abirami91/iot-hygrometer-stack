@@ -38,6 +38,117 @@ function setPeakBadges(tLabel, tVal, hLabel, hVal) {
     hLabel && Number.isFinite(hVal) ? `${hLabel} • ${hVal.toFixed(0)} %` : "—";
 }
 
+// ---------- setup UI (screen switching) ----------
+function showSetupScreen() {
+  const s = document.getElementById("setup-screen");
+  const d = document.getElementById("dashboard-screen");
+  if (s) s.style.display = "block";
+  if (d) d.style.display = "none";
+}
+
+let selectedDeviceMac = null;
+
+
+function showDashboardScreen() {
+  const s = document.getElementById("setup-screen");
+  const d = document.getElementById("dashboard-screen");
+  if (s) s.style.display = "none";
+  if (d) d.style.display = "block";
+}
+
+
+function renderDeviceList(devices) {
+  const box = document.getElementById("deviceList");
+  if (!box) return;
+
+  if (!devices || devices.length === 0) {
+    box.innerHTML = `<div class="text-slate-600">No BLE devices found. Move the sensor closer and try again.</div>`;
+    return;
+  }
+
+  const rows = devices.map(d => {
+    const mac = d.mac || "";
+    const name = d.name || "(unknown)";
+    const isSelected = selectedDeviceMac && mac === selectedDeviceMac;
+
+    return `
+      <div class="flex items-center justify-between gap-2 py-2 border-b border-slate-100 last:border-b-0">
+        <div class="min-w-0">
+          <div class="font-mono text-xs text-slate-700">${mac}</div>
+          <div class="text-sm text-slate-900 truncate">${name}</div>
+          <div class="text-xs text-slate-500">RSSI: ${typeof d.rssi === "number" ? d.rssi : "—"}</div>
+        </div>
+        <button class="btnSelectDevice px-3 py-2 rounded-lg border
+                       ${isSelected ? "bg-emerald-50 border-emerald-300 text-emerald-900" : "border-slate-300"}"
+                data-mac="${mac}"
+                data-name="${d.name || ""}"
+                ${isSelected ? "disabled" : ""}>
+          ${isSelected ? "Selected" : "Select"}
+        </button>
+      </div>
+    `;
+  }).join("");
+
+  box.innerHTML = rows;
+
+  box.querySelectorAll(".btnSelectDevice").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const mac = btn.getAttribute("data-mac");
+      const name = btn.getAttribute("data-name") || null;
+      await selectDevice(mac, name);
+    });
+  });
+}
+
+
+async function scanDevices() {
+  const status = document.getElementById("scanStatus");
+  if (status) status.textContent = "Scanning… (10s)";
+
+  try {
+    const r = await fetch("/api/setup/devices", { cache: "no-store" });
+    if (!r.ok) throw new Error("Scan API not ready");
+    const data = await r.json(); // { devices: [...] }
+    renderDeviceList(data.devices || []);
+    if (status) status.textContent = "Scan complete.";
+  } catch {
+    renderDeviceList([]);
+    if (status) status.textContent = "Scan API not implemented yet (next step).";
+  }
+}
+
+async function selectDevice(mac, name) {
+  const status = document.getElementById("scanStatus");
+  if (status) status.textContent = `Saving ${mac}…`;
+
+  try {
+    const r = await fetch("/api/setup/select", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ mac, name })
+    });
+    if (!r.ok) throw new Error(await r.text());
+
+    if (status) status.textContent = "Saved. Reloading…";
+    location.reload();
+  } catch (e) {
+    console.error(e);
+    if (status) status.textContent = "Select API not implemented yet (next step).";
+  }
+}
+
+
+// expected backend response: { configured: true/false, device?: {...} }
+async function getSetupStatus() {
+  try {
+    const r = await fetch("/api/setup/status", { cache: "no-store" });
+    if (!r.ok) return { configured: true }; // keep current behavior if API isn't ready
+    return await r.json();
+  } catch {
+    return { configured: true }; // if endpoint doesn't exist yet, don't block dashboard
+  }
+}
+
 // register annotation plugin if loaded via <script>
 if (window.ChartAnnotation) {
   Chart.register(window.ChartAnnotation);
@@ -220,7 +331,13 @@ function makeMainChart(ctx) {
         legend: { position: "top" },
         tooltip: {
           callbacks: {
-            title(items) { return items[0]?.label || ""; },
+            title(items) {
+              const i = items[0]?.dataIndex;
+              return rowsGlobal?.[i]?.ts_utc
+                ?.replace("T", " ")
+                ?.replace("Z", "") || "";
+            },
+            
             label(ctx) { return `${ctx.dataset.label}: ${ctx.formattedValue}`; }
           }
         },
@@ -355,7 +472,16 @@ async function loadDay() {
     return;
   }
 
-  const labels = rows.map(r => r.ts_utc.replace("T"," ").replace("Z",""));
+  const labels = rows.map(r => {
+    const d = new Date(r.ts_utc);
+  
+    // format as HH:MM (recommended for charts)
+    return d.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+  });
+  
   const temps = rows.map(r => numOrNull(r.temp_c));
   const hums  = rows.map(r => numOrNull(r.humidity_pct));
   const batts = rows.map(r => numOrNull(r.battery_mv));
@@ -414,6 +540,59 @@ async function loadDay() {
   if (ts) ts.textContent = nowISOclock();
 }
 
+async function loadReports() {
+  const statusEl = document.getElementById("reportsStatus");
+  const listEl = document.getElementById("reportsList");
+  if (!statusEl || !listEl) return;
+
+  statusEl.textContent = "Loading…";
+  listEl.innerHTML = "";
+
+  try {
+    const res = await fetch("/api/reports", { cache: "no-store" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const reports = Array.isArray(data.reports) ? data.reports : [];
+    if (reports.length === 0) {
+      statusEl.textContent = "No reports yet.";
+      return;
+    }
+
+    statusEl.textContent = `${reports.length} file(s)`;
+
+    for (const relPath of reports) {
+      const li = document.createElement("li");
+
+      const a = document.createElement("a");
+      a.href = `/api/reports/download?path=${encodeURIComponent(relPath)}`;
+      a.textContent = relPath.split("/").pop();
+
+      // force download instead of opening in browser
+      a.download = relPath.split("/").pop();
+
+      a.style.textDecoration = "underline";
+
+
+      const meta = document.createElement("span");
+      meta.className = "ml-2 text-xs text-slate-500";
+      meta.textContent = `(${relPath})`;
+
+      li.appendChild(a);
+      li.appendChild(meta);
+      listEl.appendChild(li);
+    }
+  } catch (e) {
+    console.error(e);
+    statusEl.textContent = "Failed to load reports.";
+  }
+}
+
+
+
+
+
+
 // ---------- init ----------
 function initDate() {
   const d = new Date();
@@ -424,6 +603,22 @@ function initDate() {
 
 document.addEventListener("DOMContentLoaded", async () => {
   initDate();
+
+  // Wire setup button (safe even if setup screen hidden)
+  const scanBtn = document.getElementById("btnScanDevices");
+  if (scanBtn) scanBtn.addEventListener("click", scanDevices);
+
+  // Decide which screen to show
+  const st = await getSetupStatus();
+  // store selected (even when not configured yet)
+  selectedDeviceMac = st?.device?.mac || null;
+  if (!st.configured) {
+    showSetupScreen();
+    return; // stop here: no dashboard polling until configured
+  }
+  showDashboardScreen();
+
+  // existing logic (unchanged)
   setupUpload();
   const loadBtn = document.getElementById("loadBtn");
   if (loadBtn) loadBtn.addEventListener("click", loadDay);
@@ -432,9 +627,14 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (chartMain && chartMain.resetZoom) chartMain.resetZoom();
   });
 
+  const btn = document.getElementById("btnRefreshReports");
+  if (btn) btn.addEventListener("click", loadReports);
+
+  loadReports();
+
   await getLatest();
   await loadDay();
-  await refreshInsightsBadge(); // ✅ run once at startup
+  await refreshInsightsBadge();
 
   setInterval(async () => {
     await getLatest();
@@ -442,3 +642,4 @@ document.addEventListener("DOMContentLoaded", async () => {
     await refreshInsightsBadge();
   }, 60_000);
 });
+

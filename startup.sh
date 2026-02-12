@@ -93,6 +93,78 @@ if [[ -z "${DEVICE_MAC}" ]]; then
   echo "✅ Saved DEVICE_MAC to .env"
 fi
 
+# 3.7) Optional SMTP setup
+# Run interactive setup: STARTUP_CONFIGURE_SMTP=1 ./startup.sh
+# Or non-interactive: set SMTP_* in .env manually.
+if [[ "${STARTUP_CONFIGURE_SMTP:-0}" == "1" ]]; then
+  echo ""
+  echo "========================================"
+  echo " 📧 SMTP Setup (optional)"
+  echo "========================================"
+  echo "Tip (Gmail): use an App Password, not your normal password."
+  echo "Leave SMTP_HOST empty to skip email setup."
+  echo ""
+
+  # Always read current values (so we don't overwrite)
+  SMTP_HOST="$(get_env SMTP_HOST | tr -d '\r' || true)"
+  SMTP_PORT="$(get_env SMTP_PORT | tr -d '\r' || true)"
+  SMTP_USER="$(get_env SMTP_USER | tr -d '\r' || true)"
+  SMTP_PASS="$(get_env SMTP_PASS | tr -d '\r' || true)"
+  SMTP_FROM="$(get_env SMTP_FROM | tr -d '\r' || true)"
+  SMTP_TO="$(get_env SMTP_TO | tr -d '\r' || true)"
+  SMTP_TLS="$(get_env SMTP_TLS | tr -d '\r' || true)"
+
+  # Prompt host first; if empty -> skip whole SMTP setup
+  if [[ -z "${SMTP_HOST}" ]]; then
+    read -rp "SMTP_HOST (e.g., smtp.gmail.com) [empty = skip]: " SMTP_HOST
+    SMTP_HOST="$(echo "${SMTP_HOST}" | tr -d ' ')"
+    [[ -n "${SMTP_HOST}" ]] && set_env SMTP_HOST "${SMTP_HOST}"
+  fi
+
+  if [[ -z "${SMTP_HOST}" ]]; then
+    echo "ℹ️  SMTP setup skipped."
+  else
+    # Defaults (only if missing)
+    [[ -z "${SMTP_PORT}" ]] && SMTP_PORT="587"
+    [[ -z "${SMTP_TLS}"  ]] && SMTP_TLS="1"
+
+    read -rp "SMTP_PORT [${SMTP_PORT}]: " _in
+    [[ -n "${_in}" ]] && SMTP_PORT="${_in}"
+    set_env SMTP_PORT "${SMTP_PORT}"
+
+    read -rp "SMTP_TLS (1=starttls, 0=none) [${SMTP_TLS}]: " _in
+    [[ -n "${_in}" ]] && SMTP_TLS="${_in}"
+    set_env SMTP_TLS "${SMTP_TLS}"
+
+    if [[ -z "${SMTP_USER}" ]]; then
+      read -rp "SMTP_USER (email address): " SMTP_USER
+      [[ -n "${SMTP_USER}" ]] && set_env SMTP_USER "${SMTP_USER}"
+    fi
+
+    if [[ -z "${SMTP_PASS}" ]]; then
+      read -rsp "SMTP_PASS (app password recommended): " SMTP_PASS
+      echo ""
+      [[ -n "${SMTP_PASS}" ]] && set_env SMTP_PASS "${SMTP_PASS}"
+    fi
+
+    if [[ -z "${SMTP_TO}" ]]; then
+      read -rp "SMTP_TO (recipient email, comma-separated ok): " SMTP_TO
+      [[ -n "${SMTP_TO}" ]] && set_env SMTP_TO "${SMTP_TO}"
+    fi
+
+    # Default FROM to USER if missing
+    SMTP_FROM="$(get_env SMTP_FROM | tr -d '\r' || true)"
+    SMTP_USER="$(get_env SMTP_USER | tr -d '\r' || true)"
+    if [[ -z "${SMTP_FROM}" && -n "${SMTP_USER}" ]]; then
+      set_env SMTP_FROM "${SMTP_USER}"
+    fi
+
+    echo "✅ SMTP values saved in .env"
+  fi
+fi
+
+
+
 # 4) Data directory + permissions
 echo "📂 Preparing data directory..."
 mkdir -p data/archive data/insights data/reports
@@ -155,6 +227,22 @@ else
   echo "✅ Cron installed:"
   echo "   $CRON_LINE"
 fi
+
+# 7.5) Optional: send test report email immediately
+# Use: STARTUP_TEST_EMAIL=1 ./startup.sh
+if [[ "${STARTUP_TEST_EMAIL:-0}" == "1" ]]; then
+  echo ""
+  echo "📧 Sending test report email..."
+
+  TODAY="$(date +%Y-%m-%d)"
+
+  docker exec -i hygro-reporter \
+    sh -lc "SEND_EMAIL=1 REPORT_DATE=${TODAY} python /app/generate_and_send.py" \
+    || echo "⚠️  Test email failed (see reporter logs)"
+
+  echo "✅ Test email triggered."
+fi
+
 
 # 9) Print URLs
 echo ""

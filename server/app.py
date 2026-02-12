@@ -1,32 +1,204 @@
 import csv
 import io
+import asyncio
 import os
 import sqlite3
 from datetime import datetime, date
 from typing import List, Optional
-
+import subprocess
+import re
+from fastapi import HTTPException
 from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel
+from pathlib import Path
+import json
 
 import json
 from fastapi.responses import FileResponse
+from fastapi import Query
 
-INSIGHTS_PATH = os.path.join("data", "insights", "latest.json")
+DATA_DIR = os.getenv("DATA_DIR", "/data")
 
+DB_PATH = os.path.join(DATA_DIR, "hygro.db")
+CSV_CURRENT = os.path.join(DATA_DIR, "current.csv")
+SETUP_CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+INSIGHTS_PATH = os.path.join(DATA_DIR, "insights", "latest.json")
+REPORTS_DIR = os.path.join(DATA_DIR, "reports")
 
-
-DB_PATH = os.path.join("data", "hygro.db")
-os.makedirs("data", exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(os.path.join(DATA_DIR, "insights"), exist_ok=True)
 os.makedirs("static/uploads", exist_ok=True)
-CSV_CURRENT = os.path.join("data", "current.csv")  # because /app/data is mounted to ./data
 
 
-app = FastAPI(title="Hygrometer Cloud")
+
+class SelectDeviceReq(BaseModel):
+    mac: str
+    name: Optional[str] = None
+
+def _load_setup_cfg() -> dict:
+    if not os.path.exists(SETUP_CONFIG_PATH):
+        return {}
+    try:
+        with open(SETUP_CONFIG_PATH, "r", encoding="utf-8") as f:
+            return json.load(f) or {}
+    except Exception:
+        return {}
+
+def _save_setup_cfg(cfg: dict) -> None:
+    os.makedirs(os.path.dirname(SETUP_CONFIG_PATH), exist_ok=True)
+    with open(SETUP_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2)
+
+app = FastAPI(title="Hygrometer Cloud") 
+
+@app.on_event("startup")
+async def _auto_import_current_csv():
+    async def loop():
+        while True:
+            try:
+                import_current_csv()  # your existing endpoint function
+            except Exception as e:
+                print("[WARN] auto-import failed:", e, flush=True)
+            await asyncio.sleep(60)
+
+    asyncio.create_task(loop())
+
+@app.get("/api/setup/status")
+def setup_status():
+    if not os.path.exists(SETUP_CONFIG_PATH):
+        return {"configured": False}
+
+    try:
+        with open(SETUP_CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return {"configured": False}
+
+    mac = (cfg.get("device_mac") or "").strip()
+    name = (cfg.get("device_name") or "").strip()
+
+    if not mac:
+        return {"configured": False}
+
+    return {"configured": True, "device": {"mac": mac, "name": name or None}}
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
+
+@app.get("/api/setup/devices")
+def scan_ble_devices():
+    env = {**os.environ, "DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/run/dbus/system_bus_socket"}
+
+    # 1) Trigger scan for 12s (fills bluetoothctl cache)
+    subprocess.run(
+        ["bluetoothctl", "--timeout", "12", "scan", "on"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+    # 2) List known devices from cache
+    proc = subprocess.run(
+        ["bluetoothctl", "devices"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
+
+    # lines: "Device AA:BB:CC:DD:EE:FF Name"
+    dev_line = re.compile(r"^Device\s+([0-9A-F:]{17})\s+(.+)$", re.IGNORECASE)
+
+    devices = []
+    for line in out.splitlines():
+        m = dev_line.match(line.strip())
+        if not m:
+            continue
+        mac = m.group(1).upper()
+        name = m.group(2).strip()
+        if name == mac or name.replace(":", "-").upper() == mac.replace(":", "-"):
+            name = None
+
+        # 3) Try get RSSI from bluetoothctl info
+        rssi = None
+        info = subprocess.run(
+            ["bluetoothctl", "info", mac],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        ).stdout or ""
+        m_rssi = re.search(r"RSSI:\s*(-?\d+)", info)
+        if m_rssi:
+            rssi = int(m_rssi.group(1))
+
+        devices.append({"mac": mac, "name": name, "rssi": rssi})
+
+    # Strongest RSSI first; named devices first
+    devices.sort(key=lambda d: (d["rssi"] is None, -(d["rssi"] or -999), d["name"] is None))
+
+    return {"devices": devices}
+
+
+
+@app.get("/api/reports")
+def list_reports():
+    base = Path(REPORTS_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(
+        list(base.glob("**/*.zip")) +
+        list(base.glob("**/*.pdf"))
+    )
+
+    rel = [str(p.relative_to(base)) for p in files]
+    rel.sort(reverse=True)
+
+    return {"reports": rel}
+
+
+@app.get("/api/reports/download")
+def download_report(path: str):
+    base = Path(REPORTS_DIR).resolve()
+    fp = (base / path).resolve()
+
+    if not str(fp).startswith(str(base) + os.sep):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    if not fp.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+
+    media = "application/pdf" if fp.suffix == ".pdf" else "application/zip"
+    return FileResponse(str(fp), filename=fp.name, media_type=media)
+
+
+
+@app.get("/api/setup/selected")
+def setup_selected():
+    cfg = _load_setup_cfg()
+    mac = (cfg.get("device_mac") or "").strip()
+    name = (cfg.get("device_name") or "").strip()
+
+    return {"mac": mac or None, "name": name or None}
+
+@app.post("/api/setup/select")
+def setup_select(req: SelectDeviceReq):
+    mac = (req.mac or "").strip().upper()
+    if not mac:
+        raise HTTPException(status_code=400, detail="mac is required")
+
+    cfg = _load_setup_cfg()
+    cfg["device_mac"] = mac
+    cfg["device_name"] = (req.name or "").strip() or None
+    _save_setup_cfg(cfg)
+
+    return {"ok": True, "device": {"mac": cfg["device_mac"], "name": cfg["device_name"]}}
 
 
 def get_db():
@@ -181,7 +353,6 @@ def import_csv_bytes(raw: bytes, conn: sqlite3.Connection) -> int:
     return inserted
 
 
-
 @app.get("/api/insights/latest")
 def api_insights_latest():
     if not os.path.exists(INSIGHTS_PATH):
@@ -276,7 +447,7 @@ async def upload_csv(file: UploadFile = File(...)):
 
 @app.post("/api/import-current")
 def import_current_csv():
-    csv_path = os.path.join("data", "current.csv")  # inside container
+    csv_path = os.path.join(DATA_DIR, "current.csv")  # /data/current.csv
     if not os.path.exists(csv_path):
         raise HTTPException(status_code=404, detail=f"Missing {csv_path}")
 

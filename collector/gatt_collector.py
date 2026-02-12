@@ -2,9 +2,13 @@ import os, csv, time, asyncio, pathlib, struct
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
 
+import json
+
+CONFIG_PATH = os.getenv("SETUP_CONFIG_PATH", "/data/config.json")
+
 # ---- Configuration (env-overridable) ----
 NOTIFY_UUID = "ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6"
-DEVICE_MAC  = os.getenv("DEVICE_MAC","").strip().upper()
+DEVICE_MAC = None  # will be loaded from config
 OUTPUT      = os.getenv("OUTPUT","/data/current.csv")
 INTERVAL    = int(os.getenv("INTERVAL_SECONDS","600"))
 
@@ -24,6 +28,16 @@ VERSION = "gatt-robust v1"
 
 last = {"temp_c":None, "humidity_pct":None, "battery_mv":None}
 last_written = 0.0
+
+
+def get_selected_mac():
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f) or {}
+        mac = (cfg.get("device_mac") or "").strip().upper()
+        return mac or None
+    except Exception:
+        return None
 
 def ensure_csv(path):
     p = pathlib.Path(path)
@@ -193,9 +207,18 @@ async def periodic_poll():
             print(f"[LOG] wrote CSV at {datetime.fromtimestamp(now)}", flush=True)
 
 async def main():
-    if not DEVICE_MAC:
-        raise SystemExit("Set DEVICE_MAC env (e.g., A4:C1:38:CD:41:83)")
+    global DEVICE_MAC
     ensure_csv(OUTPUT)
+
+    while True:
+        DEVICE_MAC = get_selected_mac()
+        if DEVICE_MAC:
+            break
+        print("[INFO] No device selected yet. Waiting for /api/setup/select...", flush=True)
+        await asyncio.sleep(2)
+
+    print(f"[INFO] Using selected MAC from config: {DEVICE_MAC}", flush=True)
+
     if PERSISTENT_NOTIFY:
         await persistent_stream()
     else:
