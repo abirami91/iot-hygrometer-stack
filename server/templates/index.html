@@ -1,186 +1,299 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Hygrometer Cloud</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!doctype html>
+  <html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Hygrometer Cloud</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-  <!-- Tailwind -->
-  <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind -->
+    <script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Chart.js -->
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
-</head>
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.1/dist/chartjs-plugin-zoom.umd.min.js"></script>
+  </head>
 
-<body class="bg-slate-50 text-slate-900">
-  <div class="max-w-6xl mx-auto p-4 space-y-6">
+  <body class="bg-slate-50 text-slate-900">
+    <div class="max-w-6xl mx-auto p-4 space-y-6">
 
-    <!-- Topbar -->
-    <header class="flex items-center justify-between">
-      <div class="flex items-center gap-3">
-        <div class="w-9 h-9 rounded-2xl bg-blue-600/90 text-white grid place-items-center text-lg font-bold">H</div>
-        <div>
-          <h1 class="text-2xl font-bold leading-tight">Hygrometer Dashboard</h1>
-          <div class="text-xs text-slate-500">Simple, self-hosted logs from your BLE sensor</div>
-        </div>
-      </div>
-      <div class="flex items-center gap-3">
-        <span id="badgeStatus" class="px-2 py-1 rounded-full text-xs bg-slate-200 text-slate-700">Idle</span>
-        <a class="text-sm underline text-slate-600 hover:text-slate-900"
-           href="/static/uploads" target="_blank">Uploaded files</a>
-      </div>
-    </header>
-
-    <!-- ================= SETUP SCREEN ================= -->
-    <section id="setup-screen" style="display:none;" class="max-w-4xl mx-auto p-4">
-      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
-        <h2 class="text-lg font-semibold">Setup Hygrometer</h2>
-        <p class="text-slate-600 text-sm mt-1">
-          Scan for nearby BLE devices and select your hygrometer.
-        </p>
-
-        <div class="mt-4 flex gap-2 items-center">
-          <button id="btnScanDevices"
-                  class="px-3 py-2 rounded-lg bg-slate-900 text-white">
-            Scan for devices
-          </button>
-          <span id="scanStatus" class="text-sm text-slate-600"></span>
-        </div>
-
-        <div id="deviceList"
-             class="mt-4 border border-slate-200 rounded-xl p-3 text-sm text-slate-700">
-          No scan yet.
-        </div>
-      </div>
-    </section>
-  
-
-    <!-- ================= DASHBOARD SCREEN ================= -->
-    <section id="dashboard-screen" class="space-y-6">
-
-      <!-- Upload -->
-      <section class="bg-white rounded-2xl shadow p-5">
-        <div class="flex items-start gap-4">
+      <!-- Topbar -->
+      <header class="flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-9 h-9 rounded-2xl bg-blue-600/90 text-white grid place-items-center text-lg font-bold">H</div>
           <div>
-            <div class="font-semibold">Upload CSV</div>
-            <p class="text-sm text-slate-500">
-              Accepts your <code>current.csv</code>. Rows will be merged (UPSERT) into the database.
-            </p>
+            <h1 class="text-2xl font-bold leading-tight">Hygrometer Dashboard</h1>
+            <div class="text-xs text-slate-500">Simple, self-hosted logs from your BLE sensor</div>
           </div>
         </div>
+        <div class="flex items-center gap-3">
+          <button id="btnNavSetup"
+                  class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-50">
+            Setup
+          </button>
+        
+          <button id="btnNavDashboard"
+                  class="px-3 py-2 rounded-lg border border-slate-300 text-sm hover:bg-slate-50">
+            Dashboard
+          </button>
+        
+          <span id="badgeStatus" class="px-2 py-1 rounded-full text-xs bg-slate-200 text-slate-700">Idle</span>
+        
+          <a class="text-sm underline text-slate-600 hover:text-slate-900"
+            href="/static/uploads" target="_blank">Uploaded files</a>
+        </div>
+      </header>
 
-        <form id="uploadForm"
-              class="mt-4 flex flex-wrap items-center gap-3"
-              onsubmit="return false;">
-          <input id="fileInput" type="file" accept=".csv" class="block text-sm" />
-          <button id="uploadBtn"
-                  class="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm">
-            Upload
-          </button>
-          <button id="exportBtn"
-                  class="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm">
-            Download CSV
-          </button>
-          <div id="uploadMsg" class="text-sm text-slate-600"></div>
-        </form>
+      <!-- ================= SETUP SCREEN ================= -->
+      <section id="setup-screen" style="display:none;" class="max-w-4xl mx-auto p-4">
+        <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-4">
+          <h2 class="text-lg font-semibold">Setup Hygrometer</h2>
+          <p class="text-slate-600 text-sm mt-1">
+            Scan for nearby BLE devices and select your hygrometer.
+          </p>
+
+          <div class="mt-4">
+            <h3 class="text-lg font-semibold">Rooms</h3>
+            <p class="text-sm text-slate-600">Assign a hygrometer to each room.</p>
+          
+            <div id="roomsList" class="mt-3 space-y-2"></div>
+          </div>
+          
+          <div class="mt-6">
+            <h3 class="text-lg font-semibold">Nearby Devices</h3>
+            <p class="text-sm text-slate-600">Scan and assign a device to a room.</p>
+          
+            <div id="deviceList" class="mt-3"></div>
+          </div>
+          <div class="mt-4 flex gap-2 items-center">
+            <button id="btnScanDevices" class="px-3 py-2 rounded-lg bg-slate-900 text-white">
+              Scan for devices
+            </button>
+          
+            <button id="btnGoDashboard" class="px-3 py-2 rounded-lg bg-blue-600 text-white hidden">
+              Go to Dashboard
+            </button>
+          
+            <span id="scanStatus" class="text-sm text-slate-600"></span>
+          </div>
+
+          <div id="deviceListEmpty"
+              class="mt-4 border border-slate-200 rounded-xl p-3 text-sm text-slate-700">
+            No scan yet.
+          </div>
+
+          <div class="mt-6">
+            <h3 class="text-lg font-semibold">Email Configuration</h3>
+            <p class="text-sm text-slate-600">Configure SMTP settings for sending reports.</p>
+          
+            <div class="mt-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+              <label class="flex items-center gap-2 text-sm">
+                <input id="emailEnabled" type="checkbox" />
+                Enable email reports
+              </label>
+          
+              <label class="flex items-center gap-2 text-sm">
+                <input id="emailTls" type="checkbox" checked />
+                Use TLS
+              </label>
+          
+              <input id="smtpHost" type="text" placeholder="SMTP host"
+                    class="px-3 py-2 rounded-lg border border-slate-300 text-sm" />
+          
+              <input id="smtpPort" type="number" placeholder="SMTP port"
+                    class="px-3 py-2 rounded-lg border border-slate-300 text-sm" />
+          
+              <input id="smtpUser" type="text" placeholder="SMTP username"
+                    class="px-3 py-2 rounded-lg border border-slate-300 text-sm" />
+          
+              <input id="smtpPass" type="password" placeholder="SMTP password"
+                    class="px-3 py-2 rounded-lg border border-slate-300 text-sm" />
+          
+              <input id="mailFrom" type="email" placeholder="From email"
+                    class="px-3 py-2 rounded-lg border border-slate-300 text-sm" />
+          
+              <input id="mailTo" type="email" placeholder="To email"
+                    class="px-3 py-2 rounded-lg border border-slate-300 text-sm" />
+            </div>
+          
+            <div class="mt-4 flex gap-2 items-center">
+              <button id="btnSaveEmail"
+                      class="px-3 py-2 rounded-lg bg-slate-900 text-white">
+                Save Email Settings
+              </button>
+            
+              <button id="btnTestEmail"
+                      class="px-3 py-2 rounded-lg bg-blue-600 text-white">
+                Send Test Email
+              </button>
+            
+              <span id="emailStatus" class="text-sm text-slate-600"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+    
+
+      <!-- ================= DASHBOARD SCREEN ================= -->
+      <section id="dashboard-screen" class="space-y-6">
+
+        <!-- Upload -->
+        <section class="bg-white rounded-2xl shadow p-5">
+          <div class="flex items-start gap-4">
+            <div>
+              <div class="font-semibold">Upload CSV</div>
+              <p class="text-sm text-slate-500">
+                Accepts your <code>current.csv</code>. Rows will be merged (UPSERT) into the database.
+              </p>
+            </div>
+          </div>
+
+          <form id="uploadForm"
+                class="mt-4 flex flex-wrap items-center gap-3"
+                onsubmit="return false;">
+            <input id="fileInput" type="file" accept=".csv" class="block text-sm" />
+            <button id="uploadBtn"
+                    class="px-4 py-2 rounded-lg bg-blue-600 text-white text-sm">
+              Upload
+            </button>
+            <button id="exportBtn"
+                    class="px-4 py-2 rounded-lg bg-emerald-600 text-white text-sm">
+              Download CSV
+            </button>
+            <div id="uploadMsg" class="text-sm text-slate-600"></div>
+          </form>
+        </section>
+
+        <div class="flex items-center justify-between mt-4">
+          <div class="text-slate-900 font-medium">Reports</div>
+        
+          <div class="flex items-center gap-2">
+            <button id="btnSendLatestReport"
+                    class="px-3 py-2 rounded-lg bg-blue-600 text-white hover:bg-blue-700">
+              Send Latest Report
+            </button>
+        
+            <button id="btnRefreshReports"
+                    class="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">
+              Refresh
+            </button>
+          </div>
+        </div>
+        <div id="reportsStatus" class="text-slate-600 text-sm mt-1">Loading…</div>
+        <div id="reportSendStatus" class="text-slate-600 text-sm mt-1"></div>
+        <ul id="reportsList" class="mt-2 list-disc pl-5 text-sm"></ul>
       </section>
 
-    <section id="Reports" class="space-y-6">
+      <!-- Configured Room Summary -->
+        <section class="bg-white rounded-2xl shadow p-5">
+          <div class="flex items-start justify-between gap-4">
+            <div>
+              <div class="text-xs text-slate-500">Configured Room</div>
+              <div id="dashRoomLabel" class="text-xl font-semibold mt-1">—</div>
+            </div>
 
-      <div class="flex items-center justify-between mt-4">
-        <div class="text-slate-900 font-medium">Reports</div>
-      
-        <button id="btnRefreshReports"
-                class="px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50">
-          Refresh
-        </button>
-      </div>
-      
-      <div id="reportsStatus" class="text-slate-600 text-sm mt-1">Loading…</div>
-      
-      <ul id="reportsList" class="mt-2 list-disc pl-5 text-sm"></ul>
-    </section>
+            <div id="dashRoomBadge"
+                class="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-2 py-1 text-xs font-medium">
+              Unknown
+            </div>
+          </div>
 
-      <!-- Cards -->
-      <section class="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div class="bg-white rounded-2xl shadow p-5">
-          <div class="text-xs text-slate-500">Latest Temperature</div>
-          <div id="cardTemp" class="text-3xl font-semibold">—</div>
-        </div>
+          <div class="mt-3 grid grid-cols-1 sm:grid-cols-3 gap-3 text-sm text-slate-600">
+            <div>
+              <div class="text-xs text-slate-500">Room ID</div>
+              <div id="dashRoomId" class="font-medium text-slate-800">—</div>
+            </div>
 
-        <div class="bg-white rounded-2xl shadow p-5">
-          <div class="text-xs text-slate-500">Latest Humidity</div>
-          <div id="cardHum" class="text-3xl font-semibold">—</div>
-        </div>
+            <div>
+              <div class="text-xs text-slate-500">MAC</div>
+              <div id="dashRoomMac" class="font-medium text-slate-800 break-all">—</div>
+            </div>
 
-        <div class="bg-white rounded-2xl shadow p-5">
-          <div class="text-xs text-slate-500">Battery (mV)</div>
-          <div id="cardBatt" class="text-3xl font-semibold">—</div>
-        </div>
+            <div>
+              <div class="text-xs text-slate-500">Device</div>
+              <div id="dashRoomName" class="font-medium text-slate-800">—</div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Cards -->  
+        <section class="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <div class="bg-white rounded-2xl shadow p-5">
+            <div class="text-xs text-slate-500">Latest Temperature</div>
+            <div id="cardTemp" class="text-3xl font-semibold">—</div>
+          </div>
+
+          <div class="bg-white rounded-2xl shadow p-5">
+            <div class="text-xs text-slate-500">Latest Humidity</div>
+            <div id="cardHum" class="text-3xl font-semibold">—</div>
+          </div>
+
+          <div class="bg-white rounded-2xl shadow p-5">
+            <div class="text-xs text-slate-500">Battery (mV)</div>
+            <div id="cardBatt" class="text-3xl font-semibold">—</div>
+          </div>
+        </section>
+        
+
+        <!-- Controls + Charts -->
+        <section class="bg-white rounded-2xl shadow p-5">
+          <div class="flex flex-wrap items-center gap-2">
+            <label class="text-sm">Day:</label>
+            <input id="dateInput" type="date"
+                  class="border rounded px-2 py-1 text-sm" />
+            <button id="loadBtn"
+                    class="px-3 py-1 rounded bg-slate-800 text-white text-sm">
+              Load
+            </button>
+            <button id="resetZoomBtn"
+                    class="px-3 py-1 rounded bg-slate-200 text-slate-800 text-sm">
+              Reset Zoom
+            </button>
+            <div id="loadMsg" class="text-sm text-slate-600"></div>
+            <div class="ml-auto text-xs text-slate-500">
+              Auto-refresh <span class="font-medium">every 60s</span>
+              · <span id="lastUpdated">—</span>
+            </div>
+          </div>
+
+          <!-- Peak stats -->
+          <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div id="statTemp"
+                class="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm">
+              <div class="text-rose-700 font-medium">Temperature Peak</div>
+              <div class="text-rose-600">—</div>
+            </div>
+
+            <div id="statHum"
+                class="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
+              <div class="text-blue-700 font-medium">Humidity Peak</div>
+              <div class="text-blue-600">—</div>
+            </div>
+          </div>
+
+          <div class="mt-4 grid gap-6">
+            <div class="h-64">
+              <canvas id="chartMain"></canvas>
+            </div>
+            <div class="h-40">
+              <canvas id="chartBatt"></canvas>
+            </div>
+          </div>
+
+          <div class="h-56 mt-6">
+            <canvas id="chartBar"></canvas>
+          </div>
+        </section>
+
+        <footer class="py-6 text-center text-xs text-slate-500">
+          Built with ❤️ on Raspberry Pi · FastAPI + SQLite + Chart.js
+        </footer>
+
       </section>
-      
+      <!-- ================= END DASHBOARD SCREEN ================= -->
 
-      <!-- Controls + Charts -->
-      <section class="bg-white rounded-2xl shadow p-5">
-        <div class="flex flex-wrap items-center gap-2">
-          <label class="text-sm">Day:</label>
-          <input id="dateInput" type="date"
-                 class="border rounded px-2 py-1 text-sm" />
-          <button id="loadBtn"
-                  class="px-3 py-1 rounded bg-slate-800 text-white text-sm">
-            Load
-          </button>
-          <button id="resetZoomBtn"
-                  class="px-3 py-1 rounded bg-slate-200 text-slate-800 text-sm">
-            Reset Zoom
-          </button>
-          <div id="loadMsg" class="text-sm text-slate-600"></div>
-          <div class="ml-auto text-xs text-slate-500">
-            Auto-refresh <span class="font-medium">every 60s</span>
-            · <span id="lastUpdated">—</span>
-          </div>
-        </div>
+    </div>
 
-        <!-- Peak stats -->
-        <div class="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div id="statTemp"
-               class="rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm">
-            <div class="text-rose-700 font-medium">Temperature Peak</div>
-            <div class="text-rose-600">—</div>
-          </div>
-
-          <div id="statHum"
-               class="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-sm">
-            <div class="text-blue-700 font-medium">Humidity Peak</div>
-            <div class="text-blue-600">—</div>
-          </div>
-        </div>
-
-        <div class="mt-4 grid gap-6">
-          <div class="h-64">
-            <canvas id="chartMain"></canvas>
-          </div>
-          <div class="h-40">
-            <canvas id="chartBatt"></canvas>
-          </div>
-        </div>
-
-        <div class="h-56 mt-6">
-          <canvas id="chartBar"></canvas>
-        </div>
-      </section>
-
-      <footer class="py-6 text-center text-xs text-slate-500">
-        Built with ❤️ on Raspberry Pi · FastAPI + SQLite + Chart.js
-      </footer>
-
-    </section>
-    <!-- ================= END DASHBOARD SCREEN ================= -->
-
-  </div>
-
-  <script src="/static/app.js?v=7"></script>
-</body>
-</html>
+    <script src="/static/app.js?v=11"></script>
+  </body>
+  </html>

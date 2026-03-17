@@ -19,6 +19,9 @@ import json
 import json
 from fastapi.responses import FileResponse
 from fastapi import Query
+import smtplib
+import ssl
+from email.message import EmailMessage
 
 DATA_DIR = os.getenv("DATA_DIR", "/data")
 
@@ -34,10 +37,247 @@ os.makedirs(os.path.join(DATA_DIR, "insights"), exist_ok=True)
 os.makedirs("static/uploads", exist_ok=True)
 
 
+class EmailConfigReq(BaseModel):
+    enabled: bool = False
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_tls: bool = True
+    smtp_user: str = ""
+    smtp_pass: str = ""
+    mail_from: str = ""
+    mail_to: str = ""
+
+class IngestReadingReq(BaseModel):
+    mac: str
+    ts_utc: str
+    epoch: int
+    temp_c: Optional[float] = None
+    humidity_pct: Optional[float] = None
+    battery_mv: Optional[int] = None
 
 class SelectDeviceReq(BaseModel):
     mac: str
     name: Optional[str] = None
+    
+def _default_v2_config() -> dict:
+    return {
+        "schema_version": 2,
+        "rooms": [
+            # start with an empty default room for new users
+            # existing users will get migrated to this list
+            {"id": "default", "label": "Default", "mac": "", "name": None, "enabled": True}
+        ],
+        "email": {
+            "enabled": False,
+            "smtp_host": "",
+            "smtp_port": 587,
+            "smtp_tls": True,
+            "smtp_user": "",
+            "smtp_pass": "",
+            "mail_from": "",
+            "mail_to": ""
+        }
+    }
+    
+
+
+def load_config_v2() -> dict:
+    """
+    Always returns schema_version=2 config.
+    Migrates old config.json formats automatically.
+    """
+    raw = _load_setup_cfg()
+    if not raw:
+        # new user
+        cfg = _default_v2_config()
+        _save_setup_cfg(cfg)
+        return cfg
+
+    # Already v2
+    if raw.get("schema_version") == 2 and isinstance(raw.get("rooms"), list):
+        # Ensure required keys exist (forward compatible)
+        if "email" not in raw:
+            raw["email"] = _default_v2_config()["email"]
+            _save_setup_cfg(raw)
+        return raw
+
+    # ---- Migrate v1 -> v2 ----
+    # v1 shape: {"device_mac": "...", "device_name": "..."}
+    mac = (raw.get("device_mac") or raw.get("DEVICE_MAC") or "").strip().upper()
+    name = (raw.get("device_name") or "").strip() or None
+
+    cfg = _default_v2_config()
+    if mac:
+        cfg["rooms"] = [
+            {"id": "default", "label": "Default", "mac": mac, "name": name, "enabled": True}
+        ]
+
+    _save_setup_cfg(cfg)
+    return cfg
+
+def room_id_for_mac(cfg: dict, mac: str) -> Optional[str]:
+    m = (mac or "").strip().upper()
+    if not m:
+        return None
+    for r in (cfg.get("rooms") or []):
+        if not r.get("enabled", True):
+            continue
+        if (r.get("mac") or "").strip().upper() == m:
+            return (r.get("id") or "").strip() or None
+    return None
+
+def get_primary_room(cfg: dict) -> dict:
+    """
+    Primary room for backward compatibility:
+    - first enabled room with a mac
+    - else 'default' room if present
+    - else first room
+    - else synthetic default
+    """
+    rooms = cfg.get("rooms") or []
+
+    # first enabled room with configured mac
+    for r in rooms:
+        if r.get("enabled", True) and (r.get("mac") or "").strip():
+            return r
+
+    # fallback to default id
+    for r in rooms:
+        if (r.get("id") or "").strip() == "default":
+            return r
+
+    if rooms:
+        return rooms[0]
+
+    return {"id": "default", "label": "Default", "mac": "", "name": None, "enabled": True}
+
+def get_room_or_404(cfg: dict, room_id: str) -> dict:
+    rooms = cfg.get("rooms") or []
+    for r in rooms:
+        if (r.get("id") or "").strip() == room_id:
+            return r
+    raise HTTPException(status_code=404, detail=f"Unknown room_id: {room_id}")
+
+def get_email_config() -> dict:
+    cfg = load_config_v2()
+    email = cfg.get("email") or {}
+    default_email = _default_v2_config()["email"]
+    return {
+        "enabled": bool(email.get("enabled", default_email["enabled"])),
+        "smtp_host": str(email.get("smtp_host", default_email["smtp_host"])),
+        "smtp_port": int(email.get("smtp_port", default_email["smtp_port"])),
+        "smtp_tls": bool(email.get("smtp_tls", default_email["smtp_tls"])),
+        "smtp_user": str(email.get("smtp_user", default_email["smtp_user"])),
+        "smtp_pass": str(email.get("smtp_pass", default_email["smtp_pass"])),
+        "mail_from": str(email.get("mail_from", default_email["mail_from"])),
+        "mail_to": str(email.get("mail_to", default_email["mail_to"])),
+    }
+
+def save_email_config(email_cfg: dict) -> dict:
+    cfg = load_config_v2()
+    cfg["email"] = {
+        "enabled": bool(email_cfg.get("enabled", False)),
+        "smtp_host": str(email_cfg.get("smtp_host", "")).strip(),
+        "smtp_port": int(email_cfg.get("smtp_port", 587)),
+        "smtp_tls": bool(email_cfg.get("smtp_tls", True)),
+        "smtp_user": str(email_cfg.get("smtp_user", "")).strip(),
+        "smtp_pass": str(email_cfg.get("smtp_pass", "")).strip(),
+        "mail_from": str(email_cfg.get("mail_from", "")).strip(),
+        "mail_to": str(email_cfg.get("mail_to", "")).strip(),
+    }
+    _save_setup_cfg(cfg)
+    return cfg["email"]
+
+def send_email_with_attachment_from_config(file_path: str):
+    email = get_email_config()
+
+    if not email.get("enabled"):
+        raise RuntimeError("Email not enabled")
+
+    smtp_host = email.get("smtp_host", "").strip()
+    smtp_port = int(email.get("smtp_port", 587))
+    smtp_tls = bool(email.get("smtp_tls", True))
+    smtp_user = email.get("smtp_user", "").strip()
+    smtp_pass = email.get("smtp_pass", "").strip()
+    mail_from = email.get("mail_from", "").strip()
+    mail_to = email.get("mail_to", "").strip()
+
+    if not smtp_host:
+        raise RuntimeError("SMTP host missing")
+    if not mail_from:
+        raise RuntimeError("From email missing")
+    if not mail_to:
+        raise RuntimeError("To email missing")
+
+    recipients = [x.strip() for x in mail_to.split(",") if x.strip()]
+    if not recipients:
+        raise RuntimeError("No valid recipients configured")
+
+    fp = Path(file_path)
+    if not fp.exists():
+        raise RuntimeError("Attachment file not found")
+
+    msg = EmailMessage()
+    msg["Subject"] = f"Hygrometer Report - {fp.name}"
+    msg["From"] = mail_from
+    msg["To"] = ", ".join(recipients)
+    msg.set_content(f"Attached is the latest hygrometer report: {fp.name}")
+
+    data = fp.read_bytes()
+    if fp.suffix.lower() == ".pdf":
+        maintype, subtype = "application", "pdf"
+    elif fp.suffix.lower() == ".zip":
+        maintype, subtype = "application", "zip"
+    else:
+        maintype, subtype = "application", "octet-stream"
+
+    msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=fp.name)
+
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as s:
+        if smtp_tls:
+            s.starttls(context=ssl.create_default_context())
+        if smtp_user:
+            s.login(smtp_user, smtp_pass)
+        s.send_message(msg)
+
+def fetch_latest_row(conn: sqlite3.Connection, room_id: str):
+    cur = conn.execute(
+        "SELECT ts_utc, epoch, temp_c, humidity_pct, battery_mv FROM readings WHERE room_id=? ORDER BY epoch DESC LIMIT 1",
+        (room_id,)
+    )
+    return cur.fetchone()
+
+def calc_age_seconds(epoch_val) -> Optional[int]:
+    now_epoch = int(datetime.utcnow().timestamp())
+    try:
+        return now_epoch - int(epoch_val or now_epoch)
+    except Exception:
+        return None
+
+def save_rooms_v2(rooms: list[dict]) -> dict:
+    cfg = load_config_v2()
+
+    # Minimal validation
+    cleaned = []
+    seen_ids = set()
+    for r in rooms:
+        rid = (r.get("id") or "").strip()
+        label = (r.get("label") or "").strip()
+        mac = (r.get("mac") or "").strip().upper()
+        name = (r.get("name") or None)
+        enabled = bool(r.get("enabled", True))
+
+        if not rid or rid in seen_ids:
+            continue
+        seen_ids.add(rid)
+        if not label:
+            label = rid
+
+        cleaned.append({"id": rid, "label": label, "mac": mac, "name": name, "enabled": enabled})
+
+    cfg["rooms"] = cleaned
+    _save_setup_cfg(cfg)
+    return cfg
 
 def _load_setup_cfg() -> dict:
     if not os.path.exists(SETUP_CONFIG_PATH):
@@ -55,6 +295,9 @@ def _save_setup_cfg(cfg: dict) -> None:
 
 app = FastAPI(title="Hygrometer Cloud") 
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
+
 @app.on_event("startup")
 async def _auto_import_current_csv():
     async def loop():
@@ -69,25 +312,23 @@ async def _auto_import_current_csv():
 
 @app.get("/api/setup/status")
 def setup_status():
-    if not os.path.exists(SETUP_CONFIG_PATH):
-        return {"configured": False}
+    cfg = load_config_v2()
+    rooms = cfg.get("rooms") or []
+    any_configured = any((r.get("mac") or "").strip() for r in rooms)
 
-    try:
-        with open(SETUP_CONFIG_PATH, "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-    except Exception:
-        return {"configured": False}
+    # Backwards compatible response for your current UI
+    # "configured" means at least one room has a MAC.
+    primary = next((r for r in rooms if (r.get("mac") or "").strip()), None)
 
-    mac = (cfg.get("device_mac") or "").strip()
-    name = (cfg.get("device_name") or "").strip()
-
-    if not mac:
-        return {"configured": False}
-
-    return {"configured": True, "device": {"mac": mac, "name": name or None}}
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+    return {
+        "configured": bool(any_configured),
+        "device": {
+            "mac": (primary.get("mac") if primary else None),
+            "name": (primary.get("name") if primary else None)
+        } if primary else None,
+        # New data for future UI:
+        "rooms": rooms
+    }
 
 @app.get("/api/setup/devices")
 def scan_ble_devices():
@@ -145,7 +386,223 @@ def scan_ble_devices():
 
     return {"devices": devices}
 
+class RoomsSaveReq(BaseModel):
+    rooms: list[dict]
 
+@app.get("/api/setup/config")
+def setup_config():
+    return load_config_v2()
+
+@app.post("/api/setup/rooms")
+def setup_rooms(req: RoomsSaveReq):
+    cfg = save_rooms_v2(req.rooms)
+    return {"ok": True, "config": cfg}
+
+@app.get("/api/rooms")
+def api_rooms():
+    cfg = load_config_v2()
+    rooms = cfg.get("rooms") or []
+    primary = get_primary_room(cfg)
+    return {
+        "status": "ok",
+        "message": None,
+        "primary_room_id": (primary.get("id") or "default"),
+        "rooms": rooms
+    }
+    
+@app.get("/api/rooms/{room_id}/latest")
+def api_room_latest(room_id: str):
+    cfg = load_config_v2()
+    room = get_room_or_404(cfg, room_id)
+
+    configured_mac = (room.get("mac") or "").strip()
+    if not configured_mac:
+        return {
+            "status": "not_configured",
+            "message": f"Room '{room_id}' has no hygrometer configured yet.",
+            "age_seconds": None,
+            "reading": None,
+        }
+
+    conn = get_db()
+    try:
+        row = fetch_latest_row(conn, room_id)
+    finally:
+        conn.close()
+
+    if not row:
+        return {
+            "status": "no_data",
+            "message": f"No readings found yet for room '{room_id}'. Make sure the collector is running.",
+            "age_seconds": None,
+            "reading": None,
+        }
+
+    keys = ["ts_utc", "epoch", "temp_c", "humidity_pct", "battery_mv"]
+    reading = dict(zip(keys, row))
+
+    age_seconds = calc_age_seconds(reading.get("epoch"))
+    stale_seconds = int(os.getenv("STALE_SECONDS", "600"))
+
+    if age_seconds is None:
+        return {
+            "status": "stale",
+            "message": "Cannot determine data age. Collector may not be updating.",
+            "age_seconds": None,
+            "reading": reading,
+        }
+
+    if age_seconds > stale_seconds:
+        return {
+            "status": "stale",
+            "message": f"Last update was {age_seconds} seconds ago. Collector may not be receiving the device {configured_mac}.",
+            "age_seconds": age_seconds,
+            "reading": reading,
+        }
+
+    return {
+        "status": "ok",
+        "message": None,
+        "age_seconds": age_seconds,
+        "reading": reading,
+    }
+    
+
+@app.post("/api/reports/send-latest")
+def send_latest_report():
+    base = Path(REPORTS_DIR)
+    base.mkdir(parents=True, exist_ok=True)
+
+    files = sorted(
+        list(base.glob("**/*.pdf")) + list(base.glob("**/*.zip")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+
+    if not files:
+        return {"ok": False, "error": "No reports found"}
+
+    latest = files[0]
+
+    try:
+        send_email_with_attachment_from_config(str(latest))
+        return {"ok": True, "filename": latest.name}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    
+@app.get("/api/setup/email")
+def setup_email_get():
+    return {"ok": True, "email": get_email_config()}
+
+@app.post("/api/setup/email")
+def setup_email_save(req: EmailConfigReq):
+    saved = save_email_config(req.dict())
+    return {"ok": True, "email": saved}
+
+@app.post("/api/setup/test-email")
+async def test_email():
+    email = get_email_config()
+
+    if not email.get("enabled"):
+        return {"ok": False, "error": "Email not enabled"}
+
+    smtp_host = email.get("smtp_host", "").strip()
+    smtp_port = int(email.get("smtp_port", 587))
+    smtp_tls = bool(email.get("smtp_tls", True))
+    smtp_user = email.get("smtp_user", "").strip()
+    smtp_pass = email.get("smtp_pass", "").strip()
+    mail_from = email.get("mail_from", "").strip()
+    mail_to = email.get("mail_to", "").strip()
+
+    if not smtp_host:
+        return {"ok": False, "error": "SMTP host missing"}
+    if not mail_from:
+        return {"ok": False, "error": "From email missing"}
+    if not mail_to:
+        return {"ok": False, "error": "To email missing"}
+
+    recipients = [x.strip() for x in mail_to.split(",") if x.strip()]
+    if not recipients:
+        return {"ok": False, "error": "No valid recipients configured"}
+
+    try:
+        msg = EmailMessage()
+        msg["Subject"] = "Hygrometer Test Email"
+        msg["From"] = mail_from
+        msg["To"] = ", ".join(recipients)
+        msg.set_content("This is a test email from your Raspberry Pi hygrometer system.")
+
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as s:
+            if smtp_tls:
+                s.starttls(context=ssl.create_default_context())
+            if smtp_user:
+                s.login(smtp_user, smtp_pass)
+            s.send_message(msg)
+
+        return {"ok": True}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    
+@app.get("/api/rooms/{room_id}/day")
+def api_room_day(room_id: str, date_str: str = Query(..., description="YYYY-MM-DD")):
+    cfg = load_config_v2()
+    room = get_room_or_404(cfg, room_id)
+
+    configured_mac = (room.get("mac") or "").strip()
+    if not configured_mac:
+        return {"status": "not_configured", "message": f"Room '{room_id}' has no hygrometer configured yet.", "rows": []}
+
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except:
+        raise HTTPException(status_code=400, detail="Use date_str=YYYY-MM-DD")
+
+    start = f"{date_str}T00:00:00Z"
+    end   = f"{date_str}T23:59:59Z"
+
+    conn = get_db()
+    try:
+        cur = conn.execute(
+            """SELECT ts_utc, epoch, temp_c, humidity_pct, battery_mv
+               FROM readings
+               WHERE room_id=? AND ts_utc BETWEEN ? AND ?
+               ORDER BY epoch ASC""",
+            (room_id, start, end)
+        )
+        rows = [{
+            "ts_utc": r[0],
+            "epoch": r[1],
+            "temp_c": r[2],
+            "humidity_pct": r[3],
+            "battery_mv": r[4],
+        } for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+    return {"status": "ok", "message": None, "room_id": room_id, "date_str": date_str, "rows": rows}
+
+@app.post("/api/ingest/reading")
+def api_ingest_reading(req: IngestReadingReq):
+    cfg = load_config_v2()
+    room_id = room_id_for_mac(cfg, req.mac)
+    if not room_id:
+        raise HTTPException(status_code=400, detail=f"MAC not mapped to any enabled room: {req.mac}")
+
+    ts = (req.ts_utc or "").strip()
+    if ts.endswith("+00:00"):
+        ts = ts[:-6] + "Z"
+
+    conn = get_db()
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO readings(room_id, ts_utc, epoch, temp_c, humidity_pct, battery_mv) VALUES (?,?,?,?,?,?)",
+            (room_id, ts, int(req.epoch), req.temp_c, req.humidity_pct, req.battery_mv)
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"ok": True, "room_id": room_id}
 
 @app.get("/api/reports")
 def list_reports():
@@ -193,37 +650,84 @@ def setup_select(req: SelectDeviceReq):
     if not mac:
         raise HTTPException(status_code=400, detail="mac is required")
 
-    cfg = _load_setup_cfg()
-    cfg["device_mac"] = mac
-    cfg["device_name"] = (req.name or "").strip() or None
+    cfg = load_config_v2()
+    rooms = cfg.get("rooms") or []
+
+    # Find default room, else create it
+    default = None
+    for r in rooms:
+        if (r.get("id") or "").strip() == "default":
+            default = r
+            break
+    if default is None:
+        default = {"id": "default", "label": "Default", "mac": "", "name": None, "enabled": True}
+        rooms.insert(0, default)
+
+    default["mac"] = mac
+    default["name"] = (req.name or "").strip() or None
+    cfg["rooms"] = rooms
+
     _save_setup_cfg(cfg)
 
-    return {"ok": True, "device": {"mac": cfg["device_mac"], "name": cfg["device_name"]}}
+    return {"ok": True, "device": {"mac": default["mac"], "name": default["name"]}}
 
 
 def get_db():
     conn = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES)
+
+    # --- Detect existing schema ---
+    conn.execute("CREATE TABLE IF NOT EXISTS __meta(dummy INTEGER)")
+    cols = [row[1] for row in conn.execute("PRAGMA table_info(readings)").fetchall()]  # [cid, name, type, ...]
+    has_readings = len(cols) > 0
+    has_room_id = "room_id" in cols
+
+    # --- If readings exists but has no room_id, migrate ---
+    if has_readings and not has_room_id:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS readings_v2 (
+                room_id TEXT NOT NULL,
+                ts_utc TEXT NOT NULL,
+                epoch INTEGER NOT NULL,
+                temp_c REAL,
+                humidity_pct REAL,
+                battery_mv INTEGER,
+                PRIMARY KEY (room_id, epoch)
+            )
+        """)
+        # Copy old data into default room
+        conn.execute("""
+            INSERT OR REPLACE INTO readings_v2(room_id, ts_utc, epoch, temp_c, humidity_pct, battery_mv)
+            SELECT 'default', ts_utc, epoch, temp_c, humidity_pct, battery_mv
+            FROM readings
+        """)
+        conn.execute("DROP TABLE readings")
+        conn.execute("ALTER TABLE readings_v2 RENAME TO readings")
+        conn.commit()
+
+    # --- Ensure v2 schema exists (fresh installs land here) ---
     conn.execute("""
         CREATE TABLE IF NOT EXISTS readings (
+            room_id TEXT NOT NULL,
             ts_utc TEXT NOT NULL,
             epoch INTEGER NOT NULL,
             temp_c REAL,
             humidity_pct REAL,
             battery_mv INTEGER,
-            PRIMARY KEY (ts_utc, epoch)
+            PRIMARY KEY (room_id, epoch)
         )
     """)
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_epoch ON readings(epoch)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_ts ON readings(ts_utc)")
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_room_epoch ON readings(room_id, epoch)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_room_ts ON readings(room_id, ts_utc)")
     return conn
 
-def import_csv_bytes(raw: bytes, conn: sqlite3.Connection) -> int:
+def import_csv_bytes(raw: bytes, conn: sqlite3.Connection,  room_id: str = "default") -> int:
     """
     Robust importer for current.csv.
 
     Accepts either:
       A) 5-col canonical format:
-         timestamp_iso,epoch,temp_c,humidity_pct,battery_mv
+         timestamp_iso,epoch,temp_c,humidity_pct,`battery_mv
 
       B) 4-col friendly format:
          timestamp,temperature_c,humidity_percent,battery_mv
@@ -345,8 +849,8 @@ def import_csv_bytes(raw: bytes, conn: sqlite3.Connection) -> int:
                 continue
 
             conn.execute(
-                "INSERT OR REPLACE INTO readings(ts_utc, epoch, temp_c, humidity_pct, battery_mv) VALUES (?,?,?,?,?)",
-                (ts_store, epoch, temp, hum, batt_int)
+                "INSERT OR REPLACE INTO readings(room_id, ts_utc, epoch, temp_c, humidity_pct, battery_mv) VALUES (?,?,?,?,?,?)",
+                (room_id, ts_store, epoch, temp, hum, batt_int)
             )
             inserted += 1
 
@@ -438,8 +942,8 @@ async def upload_csv(file: UploadFile = File(...)):
             batt_int = int(batt) if batt is not None else None
 
             conn.execute(
-                "INSERT OR REPLACE INTO readings(ts_utc, epoch, temp_c, humidity_pct, battery_mv) VALUES (?,?,?,?,?)",
-                (ts, epoch, temp, hum, batt_int)
+                "INSERT OR REPLACE INTO readings(room_id, ts_utc, epoch, temp_c, humidity_pct, battery_mv) VALUES (?,?,?,?,?,?)",
+                ("default", ts, epoch, temp, hum, batt_int)
             )
             inserted += 1
 
@@ -454,34 +958,83 @@ def import_current_csv():
     with open(csv_path, "rb") as f:
         raw = f.read()
 
-    conn = get_db()
-    inserted = import_csv_bytes(raw, conn)
+    cfg = load_config_v2()
+    primary = get_primary_room(cfg)
+    room_id = (primary.get("id") or "default")
 
-    return {"ok": True, "inserted": inserted, "source": csv_path}
+    conn = get_db()
+    inserted = import_csv_bytes(raw, conn, room_id=room_id)
+
+    return {"ok": True, "inserted": inserted, "source": csv_path, "room_id": room_id}
 
 
 @app.get("/api/latest")
 def api_latest():
+    cfg = load_config_v2()
+    primary = get_primary_room(cfg)
+    room_id = (primary.get("id") or "default")
+
+    configured_mac = (primary.get("mac") or "").strip()
+
     conn = get_db()
-    cur = conn.execute(
-        "SELECT ts_utc, epoch, temp_c, humidity_pct, battery_mv FROM readings ORDER BY epoch DESC LIMIT 1"
-    )
-    row = cur.fetchone()
+    try:
+        row = fetch_latest_row(conn, room_id)
+    finally:
+        conn.close()
+
+    if not configured_mac:
+        return {
+            "status": "not_configured",
+            "message": "No hygrometer configured yet. Please open Setup and select a device.",
+            "age_seconds": None,
+            "reading": None,
+        }
+
     if not row:
-        return {"reading": None}
+        return {
+            "status": "no_data",
+            "message": "No readings found yet. Make sure the collector is running.",
+            "age_seconds": None,
+            "reading": None,
+        }
+
     keys = ["ts_utc", "epoch", "temp_c", "humidity_pct", "battery_mv"]
-    return {"reading": dict(zip(keys, row))}
+    reading = dict(zip(keys, row))
 
+    age_seconds = calc_age_seconds(reading.get("epoch"))
+    stale_seconds = int(os.getenv("STALE_SECONDS", "600"))
 
+    if age_seconds is None:
+        return {
+            "status": "stale",
+            "message": "Cannot determine data age. Collector may not be updating.",
+            "age_seconds": None,
+            "reading": reading,
+        }
+
+    if age_seconds > stale_seconds:
+        return {
+            "status": "stale",
+            "message": f"Last update was {age_seconds} seconds ago. Collector may not be receiving the device {configured_mac}.",
+            "age_seconds": age_seconds,
+            "reading": reading,
+        }
+
+    return {
+        "status": "ok",
+        "message": None,
+        "age_seconds": age_seconds,
+        "reading": reading,
+    }
+    
 @app.get("/api/day")
 def api_day(date_str: str):
-    """
-    date_str: YYYY-MM-DD (local date you want to view)
-    We filter by the UTC timestamp strings' date (approx; your CSV uses ISO Z times).
-    """
+    cfg = load_config_v2()
+    primary = get_primary_room(cfg)
+    room_id = (primary.get("id") or "default")
+
     try:
-        # keep as string; CSV uses ISO with Z
-        d = datetime.strptime(date_str, "%Y-%m-%d")
+        datetime.strptime(date_str, "%Y-%m-%d")
     except:
         raise HTTPException(status_code=400, detail="Use date=YYYY-MM-DD")
 
@@ -489,18 +1042,22 @@ def api_day(date_str: str):
     end   = f"{date_str}T23:59:59Z"
 
     conn = get_db()
-    cur = conn.execute(
-        """SELECT ts_utc, epoch, temp_c, humidity_pct, battery_mv
-           FROM readings
-           WHERE ts_utc BETWEEN ? AND ?
-           ORDER BY epoch ASC""",
-        (start, end)
-    )
-    rows = [{
-        "ts_utc": r[0],
-        "epoch": r[1],
-        "temp_c": r[2],
-        "humidity_pct": r[3],
-        "battery_mv": r[4],
-    } for r in cur.fetchall()]
+    try:
+        cur = conn.execute(
+            """SELECT ts_utc, epoch, temp_c, humidity_pct, battery_mv
+               FROM readings
+               WHERE room_id=? AND ts_utc BETWEEN ? AND ?
+               ORDER BY epoch ASC""",
+            (room_id, start, end)
+        )
+        rows = [{
+            "ts_utc": r[0],
+            "epoch": r[1],
+            "temp_c": r[2],
+            "humidity_pct": r[3],
+            "battery_mv": r[4],
+        } for r in cur.fetchall()]
+    finally:
+        conn.close()
+
     return {"rows": rows}

@@ -1,3 +1,7 @@
+
+let roomsAllState = []; // includes default if present
+let roomsState = [];    // UI rooms (no default)
+
 // ---------- small utils ----------
 const fmt = (x) => (x == null ? "—" : x);
 const numOrNull = (v) => {
@@ -16,7 +20,7 @@ function setBadge(text, color = "bg-slate-200 text-slate-700") {
 }
 function updateCard(id, text) {
   const el = document.getElementById(id);
-  if (!el) return;
+  if (!el) { console.warn("missing element", id); return; }
   el.style.transition = "opacity .25s";
   el.style.opacity = 0;
   setTimeout(() => { el.textContent = text; el.style.opacity = 1; }, 150);
@@ -61,15 +65,21 @@ function renderDeviceList(devices) {
   const box = document.getElementById("deviceList");
   if (!box) return;
 
+  const empty = document.getElementById("deviceListEmpty");
+  if (empty) empty.style.display = (devices && devices.length) ? "none" : "block";
+
   if (!devices || devices.length === 0) {
     box.innerHTML = `<div class="text-slate-600">No BLE devices found. Move the sensor closer and try again.</div>`;
     return;
   }
 
+  const roomOptions = (roomsState && roomsState.length)
+    ? roomsState.map(r => `<option value="${r.id}">${r.label}</option>`).join("")
+    : `<option value="">(no rooms yet)</option>`;
+
   const rows = devices.map(d => {
     const mac = d.mac || "";
     const name = d.name || "(unknown)";
-    const isSelected = selectedDeviceMac && mac === selectedDeviceMac;
 
     return `
       <div class="flex items-center justify-between gap-2 py-2 border-b border-slate-100 last:border-b-0">
@@ -78,28 +88,229 @@ function renderDeviceList(devices) {
           <div class="text-sm text-slate-900 truncate">${name}</div>
           <div class="text-xs text-slate-500">RSSI: ${typeof d.rssi === "number" ? d.rssi : "—"}</div>
         </div>
-        <button class="btnSelectDevice px-3 py-2 rounded-lg border
-                       ${isSelected ? "bg-emerald-50 border-emerald-300 text-emerald-900" : "border-slate-300"}"
-                data-mac="${mac}"
-                data-name="${d.name || ""}"
-                ${isSelected ? "disabled" : ""}>
-          ${isSelected ? "Selected" : "Select"}
-        </button>
+
+        <div class="flex items-center gap-2">
+          <select class="roomPick px-2 py-2 rounded-lg border border-slate-300 text-sm"
+                  ${roomsState.length ? "" : "disabled"}>
+            ${roomOptions}
+          </select>
+
+          <button class="btnAssignRoom px-3 py-2 rounded-lg border border-slate-300"
+                  data-mac="${mac}"
+                  data-name="${d.name || ""}"
+                  ${roomsState.length ? "" : "disabled"}>
+            Assign
+          </button>
+        </div>
       </div>
     `;
   }).join("");
 
   box.innerHTML = rows;
 
-  box.querySelectorAll(".btnSelectDevice").forEach(btn => {
+  box.querySelectorAll(".btnAssignRoom").forEach(btn => {
     btn.addEventListener("click", async () => {
       const mac = btn.getAttribute("data-mac");
       const name = btn.getAttribute("data-name") || null;
-      await selectDevice(mac, name);
+
+      const row = btn.closest("div.flex");
+      const roomId = row?.querySelector(".roomPick")?.value;
+
+      if (!roomId) {
+        alert("No rooms available. Load rooms first.");
+        return;
+      }
+
+      try {
+        await assignRoom(roomId, mac, name);
+        btn.textContent = "Assigned";
+        setTimeout(() => (btn.textContent = "Assign"), 800);
+      } catch (e) {
+        console.error(e);
+        alert("Failed to assign. Check server logs.");
+      }
     });
   });
 }
 
+async function loadRoomsState() {
+
+  const r = await fetch("/api/setup/config", { cache: "no-store" });
+  if (!r.ok) throw new Error("Config not available");
+
+  const cfg = await r.json();
+  let rooms = Array.isArray(cfg.rooms) ? cfg.rooms : [];
+
+  // Standard rooms
+  const standardRooms = [
+    { id: "living", label: "Living room" },
+    { id: "work", label: "Work room" },
+    { id: "bedroom", label: "Bedroom" }
+  ];
+
+  const existingIds = new Set(rooms.map(r => r.id));
+
+  // Add missing rooms automatically
+  for (const s of standardRooms) {
+    if (!existingIds.has(s.id)) {
+      rooms.push({
+        id: s.id,
+        label: s.label,
+        mac: "",
+        name: null,
+        enabled: true
+      });
+    }
+  }
+
+  // Save updated config if rooms were added
+  await saveRooms(rooms);
+
+  roomsAllState = rooms;   
+  // Hide default room from UI
+  roomsState = roomsAllState.filter(r => r.id !== "default");
+
+  renderRooms(roomsState);
+
+  return roomsState;
+}
+
+
+async function loadDashboardRoomSummary() {
+  try {
+    const r = await fetch("/api/setup/config", { cache: "no-store" });
+    if (!r.ok) return;
+
+    const cfg = await r.json();
+    const rooms = cfg.rooms || [];
+
+    // find first enabled room with a MAC
+    const room = rooms.find(r => r.enabled && r.mac);
+
+    const labelEl = document.getElementById("dashRoomLabel");
+    const idEl = document.getElementById("dashRoomId");
+    const macEl = document.getElementById("dashRoomMac");
+    const nameEl = document.getElementById("dashRoomName");
+    const badge = document.getElementById("dashRoomBadge");
+
+    if (!room) {
+      if (labelEl) labelEl.textContent = "No room configured";
+      if (idEl) idEl.textContent = "—";
+      if (macEl) macEl.textContent = "—";
+      if (nameEl) nameEl.textContent = "—";
+      if (badge) {
+        badge.textContent = "Not configured";
+        badge.className =
+          "inline-flex items-center rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-xs font-medium";
+      }
+      return;
+    }
+
+    if (labelEl) labelEl.textContent = room.label || room.id;
+    if (idEl) idEl.textContent = room.id || "—";
+    if (macEl) macEl.textContent = room.mac || "—";
+    if (nameEl) nameEl.textContent = room.name || "—";
+
+    if (badge) {
+      badge.textContent = "Configured";
+      badge.className =
+        "inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 px-2 py-1 text-xs font-medium";
+    }
+
+  } catch (err) {
+    console.error("Failed loading dashboard room", err);
+  }
+}
+
+async function getSetupConfig() {
+  const r = await fetch("/api/setup/config", { cache: "no-store" });
+  if (!r.ok) throw new Error("config not available");
+  return await r.json();
+}
+
+function renderRooms(rooms) {
+  const box = document.getElementById("roomsList");
+  if (!box) return;
+
+  if (!rooms || rooms.length === 0) {
+    box.innerHTML = `<div class="text-slate-600">No rooms configured yet.</div>`;
+    return;
+  }
+
+  box.innerHTML = rooms.map(r => {
+    const mac = (r.mac || "").trim();
+    const name = (r.name || "").trim();
+    const enabled = !!r.enabled;
+    const configured = !!mac;
+
+    const badge = configured
+      ? `<span class="inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 px-2 py-1 text-xs font-medium">Configured</span>`
+      : `<span class="inline-flex items-center rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-xs font-medium">Not configured</span>`;
+
+    return `
+      <div class="p-4 rounded-xl border border-slate-200 bg-white">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="font-medium text-slate-900">${r.label}</div>
+              ${badge}
+              ${
+                enabled
+                  ? `<span class="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-2 py-1 text-xs">Enabled</span>`
+                  : `<span class="inline-flex items-center rounded-full bg-slate-200 text-slate-500 px-2 py-1 text-xs">Disabled</span>`
+              }
+            </div>
+
+            <div class="mt-2 text-sm text-slate-600">
+              <div><span class="font-medium text-slate-700">Room ID:</span> ${r.id}</div>
+              <div><span class="font-medium text-slate-700">MAC:</span> ${mac || "—"}</div>
+              <div><span class="font-medium text-slate-700">Device:</span> ${name || "—"}</div>
+            </div>
+          </div>
+
+          <button class="btnClearRoom px-3 py-2 rounded-lg border border-slate-300 hover:bg-slate-50"
+                  data-room="${r.id}"
+                  ${configured ? "" : "disabled"}>
+            Clear
+          </button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  box.querySelectorAll(".btnClearRoom").forEach(btn => {
+    btn.addEventListener("click", async () => {
+      const roomId = btn.getAttribute("data-room");
+      await assignRoom(roomId, "", null);
+    });
+  });
+}
+
+async function saveRooms(rooms) {
+  const r = await fetch("/api/setup/rooms", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rooms })
+  });
+  if (!r.ok) throw new Error(await r.text());
+  return await r.json();
+}
+
+
+async function assignRoom(roomId, mac, name) {
+  // update local state
+  roomsAllState = roomsAllState.map(r => {
+    if (r.id !== roomId) return r;
+    return { ...r, mac: mac || "", name: name || null };
+  });
+
+  // persist
+  await saveRooms(roomsAllState);
+
+  roomsState = roomsAllState.filter(r => r.id !== "default");
+  renderRooms(roomsState);
+  selectedDeviceMac = mac || null;
+}
 
 async function scanDevices() {
   const status = document.getElementById("scanStatus");
@@ -156,18 +367,67 @@ if (window.ChartAnnotation) {
 
 // ---------- latest cards ----------
 async function getLatest() {
-  const res = await fetch("/api/latest");
+  const res = await fetch("/api/latest", { cache: "no-store" });
   const data = await res.json();
-  const r = data.reading;
-  if (!r) {
+
+  // Backward compatibility (in case old backend)
+  if (!data.status) {
+    const r = data.reading;
+    if (!r) {
+      updateCard("cardTemp", "—");
+      updateCard("cardHum", "—");
+      updateCard("cardBatt", "—");
+      return;
+    }
+    updateCard("cardTemp", `${r.temp_c?.toFixed?.(2) ?? "—"}°C`);
+    updateCard("cardHum",  `${r.humidity_pct?.toFixed?.(2) ?? "—"}%`);
+    updateCard("cardBatt", `${r.battery_mv ?? "—"}`);
+    return;
+  }
+
+  const { status, reading, age_seconds, message } = data;
+  console.log("getLatest()", { status, reading });
+
+  // Update badge
+  if (status === "ok") {
+    setBadge("OK", "bg-emerald-100 text-emerald-800");
+  } else if (status === "stale") {
+    const mins = Math.round((age_seconds || 0) / 60);
+    setBadge(`Sensor Offline (${mins}m)`, "bg-amber-100 text-amber-800");
+  } else {
+    setBadge("Setup Required", "bg-rose-100 text-rose-800");
+  }
+
+  // Only force setup if truly not configured.
+  // Stale/no_data should still show the dashboard (just with warning/empty state).
+  if (status === "not_configured") {
+    console.warn("Setup needed:", message);
+    showSetupScreen();
+    await scanDevices();
+    return;
+  }
+
+
+  // If stale/no_data, keep dashboard visible and show placeholders.
+  if (status === "stale" || status === "no_data") {
+    showDashboardScreen();  // ensure we don't get stuck in setup
+    updateCard("cardTemp", "—");
+    updateCard("cardHum",  "—");
+    updateCard("cardBatt", "—");
+    return;
+  }
+
+  // Normal ok state
+  if (!reading) {
     updateCard("cardTemp", "—");
     updateCard("cardHum", "—");
     updateCard("cardBatt", "—");
     return;
   }
-  updateCard("cardTemp", `${r.temp_c?.toFixed?.(2) ?? "—"}°C`);
-  updateCard("cardHum",  `${r.humidity_pct?.toFixed?.(2) ?? "—"}%`);
-  updateCard("cardBatt", `${r.battery_mv ?? "—"}`);
+  console.log("updating cards with", reading);
+  updateCard("cardTemp", `${reading.temp_c?.toFixed?.(2) ?? "—"}°C`);
+  updateCard("cardHum",  `${reading.humidity_pct?.toFixed?.(2) ?? "—"}%`);
+  updateCard("cardBatt", `${reading.battery_mv ?? "—"}`);
 }
 
 // ---------- insights badge ----------
@@ -589,8 +849,95 @@ async function loadReports() {
 }
 
 
+async function loadEmailConfig() {
+  const r = await fetch("/api/setup/email", { cache: "no-store" });
+  if (!r.ok) throw new Error("email config not available");
 
+  const data = await r.json();
+  const email = data.email || {};
 
+  document.getElementById("emailEnabled").checked = !!email.enabled;
+  document.getElementById("emailTls").checked = !!email.smtp_tls;
+  document.getElementById("smtpHost").value = email.smtp_host || "";
+  document.getElementById("smtpPort").value = email.smtp_port ?? 587;
+  document.getElementById("smtpUser").value = email.smtp_user || "";
+  document.getElementById("smtpPass").value = email.smtp_pass || "";
+  document.getElementById("mailFrom").value = email.mail_from || "";
+  document.getElementById("mailTo").value = email.mail_to || "";
+}
+
+async function saveEmailConfig() {
+  const status = document.getElementById("emailStatus");
+  if (status) status.textContent = "Saving...";
+
+  const payload = {
+    enabled: document.getElementById("emailEnabled").checked,
+    smtp_tls: document.getElementById("emailTls").checked,
+    smtp_host: document.getElementById("smtpHost").value.trim(),
+    smtp_port: Number(document.getElementById("smtpPort").value || 587),
+    smtp_user: document.getElementById("smtpUser").value.trim(),
+    smtp_pass: document.getElementById("smtpPass").value.trim(),
+    mail_from: document.getElementById("mailFrom").value.trim(),
+    mail_to: document.getElementById("mailTo").value.trim(),
+  };
+
+  try {
+    const r = await fetch("/api/setup/email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!r.ok) throw new Error(await r.text());
+
+    if (status) status.textContent = "Saved.";
+  } catch (e) {
+    console.error(e);
+    if (status) status.textContent = "Failed to save email settings.";
+  }
+}
+
+async function testEmail() {
+  const status = document.getElementById("emailStatus");
+  if (status) status.textContent = "Sending test email...";
+
+  try {
+    const res = await fetch("/api/setup/test-email", {
+      method: "POST"
+    });
+
+    const data = await res.json();
+
+    if (data.ok) {
+      status.textContent = "Test email sent successfully ✔";
+    } else {
+      status.textContent = "Email failed: " + (data.error || "unknown error");
+    }
+  } catch (err) {
+    status.textContent = "Error sending email: " + err.message;
+  }
+}
+
+async function sendLatestReport() {
+  const status = document.getElementById("reportSendStatus");
+  if (status) status.textContent = "Sending latest report...";
+
+  try {
+    const res = await fetch("/api/reports/send-latest", {
+      method: "POST"
+    });
+
+    const data = await res.json();
+
+    if (data.ok) {
+      status.textContent = `Report sent successfully: ${data.filename}`;
+    } else {
+      status.textContent = `Failed to send report: ${data.error || "unknown error"}`;
+    }
+  } catch (err) {
+    status.textContent = `Error sending report: ${err.message}`;
+  }
+}
 
 
 // ---------- init ----------
@@ -604,24 +951,65 @@ function initDate() {
 document.addEventListener("DOMContentLoaded", async () => {
   initDate();
 
-  // Wire setup button (safe even if setup screen hidden)
+  // Wire setup button
   const scanBtn = document.getElementById("btnScanDevices");
   if (scanBtn) scanBtn.addEventListener("click", scanDevices);
 
+  // Load rooms
+  await loadRoomsState();
+
+  const saveEmailBtn = document.getElementById("btnSaveEmail");
+  if (saveEmailBtn) saveEmailBtn.addEventListener("click", saveEmailConfig);
+
+  const testBtn = document.getElementById("btnTestEmail");
+  if (testBtn) testBtn.addEventListener("click", testEmail);
+
+  await loadEmailConfig();
+
+  // Top navigation
+  const navSetupBtn = document.getElementById("btnNavSetup");
+  if (navSetupBtn) {
+    navSetupBtn.addEventListener("click", async () => {
+      showSetupScreen();
+      await loadRoomsState();
+      await loadEmailConfig();
+    });
+  }
+
+  const navDashboardBtn = document.getElementById("btnNavDashboard");
+  if (navDashboardBtn) {
+    navDashboardBtn.addEventListener("click", () => {
+      showDashboardScreen();
+    });
+  }
+
   // Decide which screen to show
   const st = await getSetupStatus();
-  // store selected (even when not configured yet)
   selectedDeviceMac = st?.device?.mac || null;
+
+  const goBtn = document.getElementById("btnGoDashboard");
+  if (goBtn) {
+    // show button only when configured
+    if (st.configured) goBtn.classList.remove("hidden");
+    goBtn.addEventListener("click", () => showDashboardScreen());
+  }
+
+  // Not configured → setup + auto scan
   if (!st.configured) {
     showSetupScreen();
-    return; // stop here: no dashboard polling until configured
+    await scanDevices();
+    return;
   }
+
+  // Configured → dashboard
   showDashboardScreen();
 
-  // existing logic (unchanged)
+  // Wire dashboard buttons
   setupUpload();
+
   const loadBtn = document.getElementById("loadBtn");
   if (loadBtn) loadBtn.addEventListener("click", loadDay);
+
   const resetBtn = document.getElementById("resetZoomBtn");
   if (resetBtn) resetBtn.addEventListener("click", () => {
     if (chartMain && chartMain.resetZoom) chartMain.resetZoom();
@@ -630,16 +1018,22 @@ document.addEventListener("DOMContentLoaded", async () => {
   const btn = document.getElementById("btnRefreshReports");
   if (btn) btn.addEventListener("click", loadReports);
 
-  loadReports();
+  const sendLatestBtn = document.getElementById("btnSendLatestReport");
+  if (sendLatestBtn) sendLatestBtn.addEventListener("click", sendLatestReport);
 
-  await getLatest();
-  await loadDay();
-  await refreshInsightsBadge();
+  // Initial loads (only once)
+  await Promise.all([
+    getLatest(),
+    loadDay(),
+    refreshInsightsBadge(),
+    loadReports(),
+    loadDashboardRoomSummary()
+  ]);
 
+  // Auto refresh
   setInterval(async () => {
     await getLatest();
     await loadDay();
     await refreshInsightsBadge();
   }, 60_000);
 });
-

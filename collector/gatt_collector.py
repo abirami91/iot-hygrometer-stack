@@ -34,8 +34,24 @@ def get_selected_mac():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f) or {}
+
+        # v2
+        if cfg.get("schema_version") == 2 and isinstance(cfg.get("rooms"), list):
+            for r in cfg["rooms"]:
+                if (r.get("id") or "") == "default":
+                    mac = (r.get("mac") or "").strip().upper()
+                    return mac or None
+            # fallback: first configured room
+            for r in cfg["rooms"]:
+                mac = (r.get("mac") or "").strip().upper()
+                if mac:
+                    return mac
+            return None
+
+        # v1 fallback (just in case)
         mac = (cfg.get("device_mac") or "").strip().upper()
         return mac or None
+
     except Exception:
         return None
 

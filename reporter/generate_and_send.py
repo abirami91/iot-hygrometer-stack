@@ -15,13 +15,52 @@ REPORTS_DIR = os.getenv("REPORTS_DIR", os.path.join(DATA_DIR, "reports"))
 HUMIDITY_WARN  = float(os.getenv("HUMIDITY_WARN", "60"))
 HUMIDITY_ALERT = float(os.getenv("HUMIDITY_ALERT", "65"))
 
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASS = os.getenv("SMTP_PASS", "")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
-SMTP_TO   = os.getenv("SMTP_TO", "")  # comma-separated
-SMTP_TLS  = os.getenv("SMTP_TLS", "1") == "1"
+CONFIG_PATH = os.path.join(DATA_DIR, "config.json")
+
+
+def load_email_settings():
+    email_cfg = {}
+
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                cfg = json.load(f) or {}
+            email_cfg = cfg.get("email", {}) or {}
+        except Exception as e:
+            print(f"[WARN] failed to read {CONFIG_PATH}: {e}")
+
+    smtp_user = str(email_cfg.get("smtp_user", "")).strip() or os.getenv("SMTP_USER", "")
+    smtp_host = str(email_cfg.get("smtp_host", "")).strip() or os.getenv("SMTP_HOST", "")
+    smtp_pass = str(email_cfg.get("smtp_pass", "")).strip() or os.getenv("SMTP_PASS", "")
+    smtp_from = str(email_cfg.get("mail_from", "")).strip() or os.getenv("SMTP_FROM", smtp_user)
+    smtp_to   = str(email_cfg.get("mail_to", "")).strip() or os.getenv("SMTP_TO", "")
+
+    smtp_port_raw = email_cfg.get("smtp_port", None)
+    if smtp_port_raw in (None, ""):
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    else:
+        smtp_port = int(smtp_port_raw)
+
+    smtp_tls_raw = email_cfg.get("smtp_tls", None)
+    if smtp_tls_raw is None:
+        smtp_tls = os.getenv("SMTP_TLS", "1") == "1"
+    else:
+        smtp_tls = bool(smtp_tls_raw)
+
+    enabled = email_cfg.get("enabled", None)
+    if enabled is None:
+        enabled = bool(smtp_host and smtp_to and smtp_from)
+
+    return {
+        "enabled": bool(enabled),
+        "smtp_host": smtp_host,
+        "smtp_port": smtp_port,
+        "smtp_user": smtp_user,
+        "smtp_pass": smtp_pass,
+        "smtp_from": smtp_from,
+        "smtp_to": smtp_to,
+        "smtp_tls": smtp_tls,
+    }
 
 
 def iso_day_bounds(date_str: str):
@@ -232,15 +271,32 @@ def generate_report(date_str: str) -> str:
 
 
 def send_email(date_str: str, zip_path: str):
-    if not (SMTP_HOST and SMTP_TO and SMTP_FROM):
+    email = load_email_settings()
+
+    if not email.get("enabled"):
+        print("[INFO] Email disabled; skipping email.")
+        return
+
+    smtp_host = email["smtp_host"]
+    smtp_port = email["smtp_port"]
+    smtp_user = email["smtp_user"]
+    smtp_pass = email["smtp_pass"]
+    smtp_from = email["smtp_from"]
+    smtp_to   = email["smtp_to"]
+    smtp_tls  = email["smtp_tls"]
+
+    if not (smtp_host and smtp_to and smtp_from):
         print("[INFO] SMTP not configured; skipping email.")
         return
 
-    recipients = [x.strip() for x in SMTP_TO.split(",") if x.strip()]
+    recipients = [x.strip() for x in smtp_to.split(",") if x.strip()]
+    if not recipients:
+        print("[INFO] No recipients configured; skipping email.")
+        return
 
     msg = EmailMessage()
     msg["Subject"] = f"Hygrometer nightly report — {date_str}"
-    msg["From"] = SMTP_FROM
+    msg["From"] = smtp_from
     msg["To"] = ", ".join(recipients)
 
     # Load summary from zip for email body
@@ -271,7 +327,7 @@ def send_email(date_str: str, zip_path: str):
 
     msg.set_content("\n".join(body))
 
-    # ---- attach ZIP ----
+    # attach ZIP
     with open(zip_path, "rb") as f:
         msg.add_attachment(
             f.read(),
@@ -280,7 +336,7 @@ def send_email(date_str: str, zip_path: str):
             filename=os.path.basename(zip_path),
         )
 
-    # ---- attach PDF (same folder, same base name) ----
+    # attach PDF
     pdf_path = zip_path.replace(".zip", ".pdf")
     if os.path.exists(pdf_path):
         with open(pdf_path, "rb") as f:
@@ -291,11 +347,11 @@ def send_email(date_str: str, zip_path: str):
                 filename=os.path.basename(pdf_path),
             )
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as s:
-        if SMTP_TLS:
+    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as s:
+        if smtp_tls:
             s.starttls()
-        if SMTP_USER:
-            s.login(SMTP_USER, SMTP_PASS)
+        if smtp_user:
+            s.login(smtp_user, smtp_pass)
         s.send_message(msg)
 
     print(f"[OK] emailed report to {recipients}")
