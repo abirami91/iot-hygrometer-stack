@@ -239,6 +239,61 @@ def send_email_with_attachment_from_config(file_path: str):
         if smtp_user:
             s.login(smtp_user, smtp_pass)
         s.send_message(msg)
+        
+
+def build_room_status(cfg: dict, room: dict, stale_seconds: int) -> dict:
+    room_id = (room.get("id") or "").strip()
+    label = (room.get("label") or room_id or "Unknown").strip()
+    mac = (room.get("mac") or "").strip()
+    enabled = bool(room.get("enabled", True))
+
+    base = {
+        "room_id": room_id,
+        "label": label,
+        "mac": mac,
+        "name": room.get("name"),
+        "enabled": enabled,
+        "configured": bool(mac),
+        "status": "not_configured",
+        "message": None,
+        "age_seconds": None,
+        "reading": None,
+    }
+
+    if not mac:
+        base["message"] = f"Room '{room_id}' has no hygrometer configured yet."
+        return base
+
+    conn = get_db()
+    try:
+        row = fetch_latest_row(conn, room_id)
+    finally:
+        conn.close()
+
+    if not row:
+        base["status"] = "no_data"
+        base["message"] = f"No readings found yet for room '{room_id}'."
+        return base
+
+    keys = ["ts_utc", "epoch", "temp_c", "humidity_pct", "battery_mv"]
+    reading = dict(zip(keys, row))
+    age_seconds = calc_age_seconds(reading.get("epoch"))
+
+    base["reading"] = reading
+    base["age_seconds"] = age_seconds
+
+    if age_seconds is None:
+        base["status"] = "stale"
+        base["message"] = "Cannot determine data age."
+        return base
+
+    if age_seconds > stale_seconds:
+        base["status"] = "stale"
+        base["message"] = f"Last update was {age_seconds} seconds ago."
+        return base
+
+    base["status"] = "ok"
+    return base
 
 def fetch_latest_row(conn: sqlite3.Connection, room_id: str):
     cur = conn.execute(
@@ -385,6 +440,29 @@ def scan_ble_devices():
     devices.sort(key=lambda d: (d["rssi"] is None, -(d["rssi"] or -999), d["name"] is None))
 
     return {"devices": devices}
+
+@app.get("/api/overview")
+def api_overview():
+    cfg = load_config_v2()
+    rooms = cfg.get("rooms") or []
+    stale_seconds = int(os.getenv("STALE_SECONDS", "600"))
+
+    room_items = [build_room_status(cfg, room, stale_seconds) for room in rooms]
+
+    summary = {
+        "configured_rooms": sum(1 for r in room_items if r["configured"]),
+        "enabled_rooms": sum(1 for r in room_items if r["enabled"]),
+        "ok_rooms": sum(1 for r in room_items if r["status"] == "ok"),
+        "stale_rooms": sum(1 for r in room_items if r["status"] == "stale"),
+        "no_data_rooms": sum(1 for r in room_items if r["status"] == "no_data"),
+        "not_configured_rooms": sum(1 for r in room_items if r["status"] == "not_configured"),
+    }
+
+    return {
+        "status": "ok",
+        "summary": summary,
+        "rooms": room_items,
+    }
 
 class RoomsSaveReq(BaseModel):
     rooms: list[dict]

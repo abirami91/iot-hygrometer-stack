@@ -1,6 +1,9 @@
 import os, csv, time, asyncio, pathlib, struct
 from datetime import datetime
 from bleak import BleakClient, BleakScanner
+import urllib.request
+import urllib.error
+import traceback
 
 import json
 
@@ -8,9 +11,10 @@ CONFIG_PATH = os.getenv("SETUP_CONFIG_PATH", "/data/config.json")
 
 # ---- Configuration (env-overridable) ----
 NOTIFY_UUID = "ebe0ccc1-7a0a-4b0c-8a1a-6ff2997da3a6"
-DEVICE_MAC = None  # will be loaded from config
+# DEVICE_MAC = None  # will be loaded from config
 OUTPUT      = os.getenv("OUTPUT","/data/current.csv")
 INTERVAL    = int(os.getenv("INTERVAL_SECONDS","600"))
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8081")
 
 # connection behavior
 SCAN_TIMEOUT       = float(os.getenv("SCAN_TIMEOUT","25"))   # seconds to wait for adverts
@@ -30,31 +34,74 @@ last = {"temp_c":None, "humidity_pct":None, "battery_mv":None}
 last_written = 0.0
 
 
-def get_selected_mac():
+# def get_selected_mac():
+#     try:
+#         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+#             cfg = json.load(f) or {}
+
+#         # v2
+#         if cfg.get("schema_version") == 2 and isinstance(cfg.get("rooms"), list):
+#             for r in cfg["rooms"]:
+#                 if (r.get("id") or "") == "default":
+#                     mac = (r.get("mac") or "").strip().upper()
+#                     return mac or None
+#             # fallback: first configured room
+#             for r in cfg["rooms"]:
+#                 mac = (r.get("mac") or "").strip().upper()
+#                 if mac:
+#                     return mac
+#             return None
+
+#         # v1 fallback (just in case)
+#         mac = (cfg.get("device_mac") or "").strip().upper()
+#         return mac or None
+
+#     except Exception:
+#         return None
+
+
+
+def get_enabled_rooms():
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f) or {}
 
-        # v2
+        rooms = []
+
+        # v2 config
         if cfg.get("schema_version") == 2 and isinstance(cfg.get("rooms"), list):
             for r in cfg["rooms"]:
-                if (r.get("id") or "") == "default":
-                    mac = (r.get("mac") or "").strip().upper()
-                    return mac or None
-            # fallback: first configured room
-            for r in cfg["rooms"]:
-                mac = (r.get("mac") or "").strip().upper()
-                if mac:
-                    return mac
-            return None
+                if not r.get("enabled", True):
+                    continue
 
-        # v1 fallback (just in case)
+                mac = (r.get("mac") or "").strip().upper()
+                if not mac:
+                    continue
+
+                rooms.append({
+                    "id": (r.get("id") or "").strip(),
+                    "label": (r.get("label") or "").strip() or (r.get("id") or "").strip(),
+                    "mac": mac,
+                    "name": r.get("name"),
+                })
+
+            return rooms
+
+        # v1 fallback
         mac = (cfg.get("device_mac") or "").strip().upper()
-        return mac or None
+        if mac:
+            return [{
+                "id": "default",
+                "label": "Default",
+                "mac": mac,
+                "name": cfg.get("device_name"),
+            }]
+
+        return []
 
     except Exception:
-        return None
-
+        return []
+    
 def ensure_csv(path):
     p = pathlib.Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -105,17 +152,122 @@ async def wait_one_notification(client, timeout_s):
         await client.stop_notify(NOTIFY_UUID)
     return vals
 
-async def connect_once():
+async def connect_once(mac: str):
     """
-    Scan to find the device (avoids Bleak 'not found'), then connect.
+    Scan to find one device by MAC, then connect.
     """
-    dev = await BleakScanner.find_device_by_address(DEVICE_MAC, timeout=SCAN_TIMEOUT)
+    dev = await BleakScanner.find_device_by_address(mac, timeout=SCAN_TIMEOUT)
     if dev is None:
-        raise RuntimeError("Device not advertising (scan timed out)")
+        raise RuntimeError(f"{mac}: device not advertising (scan timed out)")
 
     client = BleakClient(dev, timeout=CONNECT_TIMEOUT)
-    await client.__aenter__()  # async context enter
+    await client.__aenter__()
     return client
+
+async def poll_one_room(room: dict):
+    """
+    Connect to one configured room device, wait for one notification,
+    disconnect, and return the parsed values.
+    """
+    mac = room["mac"]
+    room_id = room.get("id") or "unknown"
+    client = None
+
+    try:
+        client = await connect_once(mac)
+        print(f"[INFO] connected to room={room_id} mac={mac}", flush=True)
+
+        vals = await wait_one_notification(client, timeout_s=NOTIFY_WINDOW_SECS)
+
+        t = vals.get("temp_c")
+        h = vals.get("humidity_pct")
+        mv = vals.get("battery_mv")
+
+        if t is not None or h is not None:
+            print(
+                f"[GATT] room={room_id} mac={mac} "
+                f"{('T=%.2f°C ' % t) if t is not None else ''}"
+                f"{('H=%.2f%% ' % h) if h is not None else ''}"
+                f"{('(batt=%dmV)' % mv) if mv is not None else ''}",
+                flush=True,
+            )
+
+        return vals
+
+    finally:
+        if client is not None:
+            try:
+                await client.__aexit__(None, None, None)
+                print(f"[INFO] disconnected room={room_id} mac={mac}", flush=True)
+            except Exception:
+                pass
+            
+async def poll_one_room_with_retry(room: dict, retries: int = 1, retry_delay: float = 3.0):
+    last_exc = None
+
+    for attempt in range(retries + 1):
+        try:
+            print(
+                f"[INFO] polling room={room['id']} mac={room['mac']} "
+                f"attempt={attempt + 1}/{retries + 1}",
+                flush=True
+            )
+            return await poll_one_room(room)
+
+        except Exception as e:
+            last_exc = e
+            print(
+                f"[WARN] poll attempt failed for room={room['id']} mac={room['mac']} "
+                f"attempt={attempt + 1}/{retries + 1}: type={type(e).__name__} repr={e!r}",
+                flush=True
+            )
+            traceback.print_exc()
+
+            if attempt < retries:
+                await asyncio.sleep(retry_delay)
+
+    raise last_exc
+            
+def post_reading_to_api(mac: str, vals: dict):
+    t = vals.get("temp_c")
+    h = vals.get("humidity_pct")
+    mv = vals.get("battery_mv")
+
+    # do not send empty readings
+    if t is None and h is None and mv is None:
+        print(f"[INFO] skip ingest for mac={mac}: empty reading", flush=True)
+        return False
+
+    now = time.time()
+    payload = {
+        "mac": mac,
+        "ts_utc": datetime.utcfromtimestamp(now).isoformat() + "Z",
+        "epoch": int(now),
+        "temp_c": t,
+        "humidity_pct": h,
+        "battery_mv": mv,
+    }
+
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url=f"{API_BASE_URL}/api/ingest/reading",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+            print(f"[INGEST] mac={mac} status={resp.status} response={raw}", flush=True)
+            return True
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode("utf-8", errors="replace")
+        print(f"[WARN] ingest HTTP error for mac={mac}: {e.code} {err_body}", flush=True)
+        return False
+    except Exception as e:
+        print(f"[WARN] ingest failed for mac={mac}: {e}", flush=True)
+        return False
 
 async def persistent_stream():
     """
@@ -223,22 +375,41 @@ async def periodic_poll():
             print(f"[LOG] wrote CSV at {datetime.fromtimestamp(now)}", flush=True)
 
 async def main():
-    global DEVICE_MAC
     ensure_csv(OUTPUT)
 
     while True:
-        DEVICE_MAC = get_selected_mac()
-        if DEVICE_MAC:
-            break
-        print("[INFO] No device selected yet. Waiting for /api/setup/select...", flush=True)
-        await asyncio.sleep(2)
+        rooms = get_enabled_rooms()
 
-    print(f"[INFO] Using selected MAC from config: {DEVICE_MAC}", flush=True)
+        if not rooms:
+            print("[INFO] No enabled rooms with MAC configured yet. Waiting...", flush=True)
+            await asyncio.sleep(5)
+            continue
 
-    if PERSISTENT_NOTIFY:
-        await persistent_stream()
-    else:
-        await periodic_poll()
+        print(f"[INFO] Found {len(rooms)} configured room(s)", flush=True)
+        for room in rooms:
+            print(
+                f"[INFO] room id={room['id']} label={room['label']} mac={room['mac']}",
+                flush=True
+            )
+
+        # For now: test one full pass over all rooms
+        for room in rooms:
+            try:
+                #vals = await poll_one_room(room)
+                vals = await poll_one_room_with_retry(room, retries=1, retry_delay=3.0)
+                post_reading_to_api(room["mac"], vals)
+            except Exception as e:
+                 print(
+                    f"[WARN] room={room['id']} mac={room['mac']} failed: "
+                    f"type={type(e).__name__} repr={e!r}",
+                    flush=True
+                 )
+                 traceback.print_exc()
+
+            await asyncio.sleep(2)
+
+        print(f"[INFO] Cycle complete. Sleeping {INTERVAL}s", flush=True)
+        await asyncio.sleep(INTERVAL)
 
 if __name__ == "__main__":
     try:

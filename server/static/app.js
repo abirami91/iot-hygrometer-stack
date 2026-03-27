@@ -1,6 +1,7 @@
 
 let roomsAllState = []; // includes default if present
 let roomsState = [];    // UI rooms (no default)
+let selectedRoomId = null;
 
 // ---------- small utils ----------
 const fmt = (x) => (x == null ? "—" : x);
@@ -133,6 +134,62 @@ function renderDeviceList(devices) {
   });
 }
 
+async function loadDashboardRoomPicker() {
+  const sel = document.getElementById("dashboardRoomSelect");
+  if (!sel) {
+    console.error("dashboardRoomSelect not found");
+    return;
+  }
+
+  try {
+    const r = await fetch("/api/rooms", { cache: "no-store" });
+    if (!r.ok) throw new Error("Failed to load /api/rooms");
+
+    const data = await r.json();
+    console.log("rooms api:", data);
+
+    const rooms = (data.rooms || []).filter(room =>
+      room.enabled && (room.mac || "").trim()
+    );
+
+    console.log("picker rooms:", rooms);
+
+    if (!rooms.length) {
+      sel.innerHTML = `<option value="">No configured rooms</option>`;
+      selectedRoomId = null;
+      return;
+    }
+
+    sel.innerHTML = rooms.map(room => `
+      <option value="${room.id}">${room.label || room.id}</option>
+    `).join("");
+
+    const validIds = rooms.map(r => r.id);
+
+    if (!selectedRoomId || !validIds.includes(selectedRoomId)) {
+      selectedRoomId = validIds.includes(data.primary_room_id)
+        ? data.primary_room_id
+        : rooms[0].id;
+    }
+
+    sel.value = selectedRoomId;
+
+    console.log("selectedRoomId init:", selectedRoomId);
+    console.log("select innerHTML:", sel.innerHTML);
+    console.log("select value:", sel.value);
+
+    sel.addEventListener("change", async (e) => {
+      selectedRoomId = e.target.value;
+      console.log("room changed:", selectedRoomId);
+      await refreshSelectedRoomDashboard();
+    });
+  } catch (err) {
+    console.error("loadDashboardRoomPicker failed:", err);
+    sel.innerHTML = `<option value="">Failed to load rooms</option>`;
+  }
+}
+
+
 async function loadRoomsState() {
 
   const r = await fetch("/api/setup/config", { cache: "no-store" });
@@ -178,14 +235,12 @@ async function loadRoomsState() {
 
 async function loadDashboardRoomSummary() {
   try {
-    const r = await fetch("/api/setup/config", { cache: "no-store" });
-    if (!r.ok) return;
+    const r = await fetch("/api/rooms", { cache: "no-store" });
+    if (!r.ok) throw new Error("Failed to load rooms");
 
-    const cfg = await r.json();
-    const rooms = cfg.rooms || [];
-
-    // find first enabled room with a MAC
-    const room = rooms.find(r => r.enabled && r.mac);
+    const data = await r.json();
+    const rooms = data.rooms || [];
+    const room = rooms.find(r => r.id === selectedRoomId);
 
     const labelEl = document.getElementById("dashRoomLabel");
     const idEl = document.getElementById("dashRoomId");
@@ -194,14 +249,14 @@ async function loadDashboardRoomSummary() {
     const badge = document.getElementById("dashRoomBadge");
 
     if (!room) {
-      if (labelEl) labelEl.textContent = "No room configured";
+      if (labelEl) labelEl.textContent = "No room selected";
       if (idEl) idEl.textContent = "—";
       if (macEl) macEl.textContent = "—";
       if (nameEl) nameEl.textContent = "—";
       if (badge) {
-        badge.textContent = "Not configured";
+        badge.textContent = "Unknown";
         badge.className =
-          "inline-flex items-center rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-xs font-medium";
+          "inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-2 py-1 text-xs font-medium";
       }
       return;
     }
@@ -212,14 +267,103 @@ async function loadDashboardRoomSummary() {
     if (nameEl) nameEl.textContent = room.name || "—";
 
     if (badge) {
-      badge.textContent = "Configured";
-      badge.className =
-        "inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 px-2 py-1 text-xs font-medium";
+      badge.textContent = room.mac ? "Configured" : "Not configured";
+      badge.className = room.mac
+        ? "inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 px-2 py-1 text-xs font-medium"
+        : "inline-flex items-center rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-xs font-medium";
     }
-
   } catch (err) {
-    console.error("Failed loading dashboard room", err);
+    console.error("Failed loading dashboard room summary:", err);
   }
+}
+
+
+function overviewStatusBadge(status) {
+  if (status === "ok") {
+    return `<span class="inline-flex items-center rounded-full bg-emerald-100 text-emerald-800 px-2 py-1 text-xs font-medium">OK</span>`;
+  }
+  if (status === "stale") {
+    return `<span class="inline-flex items-center rounded-full bg-amber-100 text-amber-800 px-2 py-1 text-xs font-medium">Stale</span>`;
+  }
+  if (status === "no_data") {
+    return `<span class="inline-flex items-center rounded-full bg-slate-100 text-slate-700 px-2 py-1 text-xs font-medium">No data</span>`;
+  }
+  return `<span class="inline-flex items-center rounded-full bg-slate-200 text-slate-700 px-2 py-1 text-xs font-medium">Not configured</span>`;
+}
+
+function renderSetupOverview(data) {
+  const summary = data.summary || {};
+  const rooms = data.rooms || [];
+
+  const setText = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value ?? "—";
+  };
+
+  setText("ovConfiguredRooms", summary.configured_rooms ?? 0);
+  setText("ovOkRooms", summary.ok_rooms ?? 0);
+  setText("ovStaleRooms", summary.stale_rooms ?? 0);
+  setText("ovNotConfiguredRooms", summary.not_configured_rooms ?? 0);
+
+  const box = document.getElementById("overviewRoomsList");
+  if (!box) return;
+
+  if (!rooms.length) {
+    box.innerHTML = `<div class="text-slate-600">No rooms available.</div>`;
+    return;
+  }
+
+  box.innerHTML = rooms.map(room => {
+    const r = room.reading || {};
+    const temp = r.temp_c != null ? `${Number(r.temp_c).toFixed(2)}°C` : "—";
+    const hum = r.humidity_pct != null ? `${Number(r.humidity_pct).toFixed(2)}%` : "—";
+    const batt = r.battery_mv != null ? `${r.battery_mv}` : "—";
+    const ageMin = room.age_seconds != null ? `${Math.round(room.age_seconds / 60)} min ago` : "—";
+
+    return `
+      <div class="rounded-xl border border-slate-200 bg-white p-4">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="font-medium text-slate-900">${room.label || room.room_id}</div>
+              ${overviewStatusBadge(room.status)}
+            </div>
+            <div class="mt-2 text-sm text-slate-600">
+              <div><span class="font-medium text-slate-700">Room ID:</span> ${room.room_id || "—"}</div>
+              <div><span class="font-medium text-slate-700">MAC:</span> ${room.mac || "—"}</div>
+              <div><span class="font-medium text-slate-700">Device:</span> ${room.name || "—"}</div>
+            </div>
+          </div>
+
+          <div class="text-sm text-slate-600 text-right">
+            <div><span class="font-medium text-slate-700">Temp:</span> ${temp}</div>
+            <div><span class="font-medium text-slate-700">Humidity:</span> ${hum}</div>
+            <div><span class="font-medium text-slate-700">Battery:</span> ${batt}</div>
+            <div><span class="font-medium text-slate-700">Last seen:</span> ${ageMin}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+async function loadSetupOverview() {
+  try {
+    const r = await fetch("/api/overview", { cache: "no-store" });
+    if (!r.ok) throw new Error("Failed to load overview");
+    const data = await r.json();
+    renderSetupOverview(data);
+  } catch (err) {
+    console.error("loadSetupOverview failed:", err);
+  }
+}
+
+
+async function refreshSelectedRoomDashboard() {
+  console.log("refreshSelectedRoomDashboard:", selectedRoomId);
+  await loadDashboardRoomSummary();
+  await getLatest();
+  await loadDay();
 }
 
 async function getSetupConfig() {
@@ -310,6 +454,7 @@ async function assignRoom(roomId, mac, name) {
   roomsState = roomsAllState.filter(r => r.id !== "default");
   renderRooms(roomsState);
   selectedDeviceMac = mac || null;
+  await loadSetupOverview()
 }
 
 async function scanDevices() {
@@ -367,28 +512,16 @@ if (window.ChartAnnotation) {
 
 // ---------- latest cards ----------
 async function getLatest() {
-  const res = await fetch("/api/latest", { cache: "no-store" });
+  if (!selectedRoomId) return;
+
+  const res = await fetch(`/api/rooms/${encodeURIComponent(selectedRoomId)}/latest`, {
+    cache: "no-store"
+  });
   const data = await res.json();
 
-  // Backward compatibility (in case old backend)
-  if (!data.status) {
-    const r = data.reading;
-    if (!r) {
-      updateCard("cardTemp", "—");
-      updateCard("cardHum", "—");
-      updateCard("cardBatt", "—");
-      return;
-    }
-    updateCard("cardTemp", `${r.temp_c?.toFixed?.(2) ?? "—"}°C`);
-    updateCard("cardHum",  `${r.humidity_pct?.toFixed?.(2) ?? "—"}%`);
-    updateCard("cardBatt", `${r.battery_mv ?? "—"}`);
-    return;
-  }
-
   const { status, reading, age_seconds, message } = data;
-  console.log("getLatest()", { status, reading });
+  console.log("getLatest()", { selectedRoomId, status, reading });
 
-  // Update badge
   if (status === "ok") {
     setBadge("OK", "bg-emerald-100 text-emerald-800");
   } else if (status === "stale") {
@@ -398,37 +531,32 @@ async function getLatest() {
     setBadge("Setup Required", "bg-rose-100 text-rose-800");
   }
 
-  // Only force setup if truly not configured.
-  // Stale/no_data should still show the dashboard (just with warning/empty state).
   if (status === "not_configured") {
-    console.warn("Setup needed:", message);
-    showSetupScreen();
-    await scanDevices();
-    return;
-  }
-
-
-  // If stale/no_data, keep dashboard visible and show placeholders.
-  if (status === "stale" || status === "no_data") {
-    showDashboardScreen();  // ensure we don't get stuck in setup
     updateCard("cardTemp", "—");
-    updateCard("cardHum",  "—");
+    updateCard("cardHum", "—");
     updateCard("cardBatt", "—");
     return;
   }
 
-  // Normal ok state
+  if (status === "stale" || status === "no_data") {
+    updateCard("cardTemp", "—");
+    updateCard("cardHum", "—");
+    updateCard("cardBatt", "—");
+    return;
+  }
+
   if (!reading) {
     updateCard("cardTemp", "—");
     updateCard("cardHum", "—");
     updateCard("cardBatt", "—");
     return;
   }
-  console.log("updating cards with", reading);
+
   updateCard("cardTemp", `${reading.temp_c?.toFixed?.(2) ?? "—"}°C`);
-  updateCard("cardHum",  `${reading.humidity_pct?.toFixed?.(2) ?? "—"}%`);
+  updateCard("cardHum", `${reading.humidity_pct?.toFixed?.(2) ?? "—"}%`);
   updateCard("cardBatt", `${reading.battery_mv ?? "—"}`);
 }
+
 
 // ---------- insights badge ----------
 async function refreshInsightsBadge() {
@@ -710,74 +838,105 @@ async function loadDay() {
   ensureCharts();
   const dateInput = document.getElementById("dateInput");
   const msg = document.getElementById("loadMsg");
-  const d = dateInput.value || new Date().toISOString().slice(0,10);
+  const d = dateInput.value || new Date().toISOString().slice(0, 10);
+
+  if (!selectedRoomId) {
+    msg.textContent = "No room selected.";
+    return;
+  }
 
   msg.textContent = "Loading…";
-  const res = await fetch(`/api/day?date_str=${encodeURIComponent(d)}`);
-  if (!res.ok) { msg.textContent = "Failed to load."; return; }
-  const { rows=[] } = await res.json();
+
+  const res = await fetch(
+    `/api/rooms/${encodeURIComponent(selectedRoomId)}/day?date_str=${encodeURIComponent(d)}`
+  );
+
+  if (!res.ok) {
+    msg.textContent = "Failed to load.";
+    return;
+  }
+
+  const { rows = [] } = await res.json();
 
   if (!rows.length) {
     chartMain.data.labels = [];
     chartMain.data.datasets.forEach(ds => ds.data = []);
     chartMain.update();
+
     chartBatt.data.labels = [];
     chartBatt.data.datasets[0].data = [];
     chartBatt.update();
+
     chartBar.data.labels = [];
     chartBar.data.datasets.forEach(ds => ds.data = []);
     chartBar.update();
+
     setPeakBadges(null, NaN, null, NaN);
     msg.textContent = `No points for ${d}.`;
     return;
   }
 
   const labels = rows.map(r => {
-    const d = new Date(r.ts_utc);
-  
-    // format as HH:MM (recommended for charts)
-    return d.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit"
-    });
+    const dt = new Date(r.ts_utc);
+    return dt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   });
-  
+
   const temps = rows.map(r => numOrNull(r.temp_c));
-  const hums  = rows.map(r => numOrNull(r.humidity_pct));
+  const hums = rows.map(r => numOrNull(r.humidity_pct));
   const batts = rows.map(r => numOrNull(r.battery_mv));
 
   chartMain.data.labels = labels;
   chartMain.data.datasets[0].data = temps;
   chartMain.data.datasets[1].data = hums;
   setYAxisRange(chartMain.options.scales.yTemp, temps);
-  setYAxisRange(chartMain.options.scales.yHum,  hums);
+  setYAxisRange(chartMain.options.scales.yHum, hums);
 
   const iT = peakIndex(temps);
   const iH = peakIndex(hums);
   const tPeakVal = iT >= 0 ? temps[iT] : null;
-  const hPeakVal = iH >= 0 ? hums[iH]  : null;
+  const hPeakVal = iH >= 0 ? hums[iH] : null;
   const tPeakLabel = iT >= 0 ? labels[iT] : null;
   const hPeakLabel = iH >= 0 ? labels[iH] : null;
 
   setPeakBadges(tPeakLabel, tPeakVal ?? NaN, hPeakLabel, hPeakVal ?? NaN);
 
   const anns = {};
-  if (iT >= 0) anns.tPeak = {
-    type: "line", xMin: labels[iT], xMax: labels[iT],
-    borderColor: chartColors().temp, borderWidth: 2,
-    label: {
-      enabled: true, backgroundColor: "rgba(239,68,68,0.15)", color: "#991b1b",
-      content: [`Temp peak`, `${tPeakVal.toFixed(2)} °C`], position: "start", yAdjust: -8
-    }
-  };
-  if (iH >= 0) anns.hPeak = {
-    type: "line", xMin: labels[iH], xMax: labels[iH],
-    borderColor: chartColors().hum, borderWidth: 2,
-    label: {
-      enabled: true, backgroundColor: "rgba(59,130,246,0.15)", color: "#1e3a8a",
-      content: [`Humidity peak`, `${hPeakVal.toFixed(0)} %`], position: "end", yAdjust: -8
-    }
-  };
+  if (iT >= 0) {
+    anns.tPeak = {
+      type: "line",
+      xMin: labels[iT],
+      xMax: labels[iT],
+      borderColor: chartColors().temp,
+      borderWidth: 2,
+      label: {
+        enabled: true,
+        backgroundColor: "rgba(239,68,68,0.15)",
+        color: "#991b1b",
+        content: [`Temp peak`, `${tPeakVal.toFixed(2)} °C`],
+        position: "start",
+        yAdjust: -8
+      }
+    };
+  }
+
+  if (iH >= 0) {
+    anns.hPeak = {
+      type: "line",
+      xMin: labels[iH],
+      xMax: labels[iH],
+      borderColor: chartColors().hum,
+      borderWidth: 2,
+      label: {
+        enabled: true,
+        backgroundColor: "rgba(59,130,246,0.15)",
+        color: "#1e3a8a",
+        content: [`Humidity peak`, `${hPeakVal.toFixed(0)} %`],
+        position: "end",
+        yAdjust: -8
+      }
+    };
+  }
+
   chartMain.options.plugins.annotation.annotations = anns;
   chartMain.update();
 
@@ -786,13 +945,12 @@ async function loadDay() {
   setYAxisRange(chartBatt.options.scales.y, batts);
   chartBatt.update();
 
-  // hourly averages bar chart
   const agg = hourlyAverages(labels, temps, hums);
   chartBar.data.labels = agg.hours;
   chartBar.data.datasets[0].data = agg.tAvg;
   chartBar.data.datasets[1].data = agg.hAvg;
   setYAxisRange(chartBar.options.scales.yTemp, agg.tAvg);
-  setYAxisRange(chartBar.options.scales.yHum,  agg.hAvg);
+  setYAxisRange(chartBar.options.scales.yHum, agg.hAvg);
   chartBar.update();
 
   msg.textContent = `Loaded ${rows.length} points for ${d}.`;
@@ -973,6 +1131,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       showSetupScreen();
       await loadRoomsState();
       await loadEmailConfig();
+      await loadSetupOverview();
     });
   }
 
@@ -1022,12 +1181,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   if (sendLatestBtn) sendLatestBtn.addEventListener("click", sendLatestReport);
 
   // Initial loads (only once)
+  await loadDashboardRoomPicker();
+
   await Promise.all([
-    getLatest(),
-    loadDay(),
+    refreshSelectedRoomDashboard(),
     refreshInsightsBadge(),
-    loadReports(),
-    loadDashboardRoomSummary()
+    loadReports()
   ]);
 
   // Auto refresh
