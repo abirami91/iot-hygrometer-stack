@@ -1,14 +1,18 @@
 FROM python:3.11-slim
 
-# System deps for FastAPI/uvicorn and SQLite
+# System deps for FastAPI/uvicorn + build tooling for armv7 (PyYAML/uvicorn extras may compile)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bluez \
-    && rm -rf /var/lib/apt/lists/*
-
+    build-essential \
+    gcc \
+    python3-dev \
+    libffi-dev \
+  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel \
+  && pip install --no-cache-dir -r requirements.txt
 
 COPY app.py .
 COPY static ./static
@@ -17,6 +21,3 @@ COPY templates ./templates
 ENV UVICORN_PORT=8000
 EXPOSE 8000
 CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${UVICORN_PORT} --proxy-headers"]
-
-
-
